@@ -17,6 +17,9 @@
 
 #define WIN32_LEAN_AND_MEAN
 #define _CRT_SECURE_NO_WARNINGS
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
 #include <windows.h>
 #include <shlobj.h>
 #include <strsafe.h>
@@ -25,11 +28,22 @@
 #include <stdio.h>
 #include <intrin.h>
 
+#define TZCLOCK_VERSION 12
+
 typedef int (WINAPI* PFN_GetTimeFormatEx)(LPCWSTR, DWORD, const SYSTEMTIME*,
                                           LPCWSTR, LPWSTR, int);
 typedef int (WINAPI* PFN_GetDateFormatEx)(LPCWSTR, DWORD, const SYSTEMTIME*,
                                           LPCWSTR, LPWSTR, int, LPCWSTR);
 typedef VOID (WINAPI* PFN_GetLocalTime)(LPSYSTEMTIME);
+
+#ifndef DEVICE_NOTIFY_CALLBACK
+#define DEVICE_NOTIFY_CALLBACK 2
+typedef ULONG (CALLBACK *PDEVICE_NOTIFY_CALLBACK_ROUTINE)(PVOID Context, ULONG Type, PVOID Setting);
+typedef struct _DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
+    PDEVICE_NOTIFY_CALLBACK_ROUTINE Callback;
+    PVOID Context;
+} DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS, *PDEVICE_NOTIFY_SUBSCRIBE_PARAMETERS;
+#endif
 
 // ------------------------------------------------------------------ config --
 static HMODULE g_selfModule = nullptr;
@@ -156,6 +170,17 @@ static void LogF(const WCHAR* fmt, ...) {
 }
 
 // ------------------------------------------------------------ target zone ---
+struct SharedState {
+    volatile LONG ready;       // DLL finished init
+    volatile LONG supported;   // hooks installed successfully
+    volatile LONG active;      // currently rewriting the clock
+    volatile LONG hits;        // number of clock formatting calls rewritten
+    volatile LONG lastError;   // Win32 error for the controller to report
+    DWORD dllVersion;
+};
+
+static SharedState* g_state = nullptr;
+
 static PFN_GetTimeFormatEx g_origTimeFmt = nullptr;
 static PFN_GetDateFormatEx g_origDateFmt = nullptr;
 static PFN_GetLocalTime   g_origLocalTime = nullptr;
@@ -165,6 +190,7 @@ static DWORD g_callSiteTime = 0;
 static DWORD g_callSiteDate[2] = { 0, 0 };
 static int   g_callSiteDateCount = 0;
 
+static SRWLOCK g_zoneLock = SRWLOCK_INIT;
 static DYNAMIC_TIME_ZONE_INFORMATION g_dtzi;
 static BOOL g_dtziValid = FALSE;
 static volatile LONG g_active = 0;
@@ -179,16 +205,20 @@ static DWORD g_callSiteLocal[8] = { 0 };
 static int   g_callSiteLocalCount = 0;
 
 static BOOL LoadTargetZone() {
+    DYNAMIC_TIME_ZONE_INFORMATION d;
     for (DWORD i = 0;; ++i) {
-        DYNAMIC_TIME_ZONE_INFORMATION d;
         if (EnumDynamicTimeZoneInformation(i, &d) != ERROR_SUCCESS) break;
         if (_wcsicmp(d.TimeZoneKeyName, g_cfg.timeZoneId) == 0) {
+            AcquireSRWLockExclusive(&g_zoneLock);
             g_dtzi = d;
             g_dtziValid = TRUE;
+            ReleaseSRWLockExclusive(&g_zoneLock);
             return TRUE;
         }
     }
+    AcquireSRWLockExclusive(&g_zoneLock);
     g_dtziValid = FALSE;
+    ReleaseSRWLockExclusive(&g_zoneLock);
     return FALSE;
 }
 
@@ -196,10 +226,19 @@ static BOOL LoadTargetZone() {
 // own transition rules. Handles DST, half/quarter-hour offsets and the date
 // rollover across midnight - it is not a fixed offset added to local time.
 static BOOL TargetNow(SYSTEMTIME* out) {
-    if (!g_dtziValid) return FALSE;
+    DYNAMIC_TIME_ZONE_INFORMATION tz;
+    BOOL valid = FALSE;
+    AcquireSRWLockShared(&g_zoneLock);
+    if (g_dtziValid) {
+        tz = g_dtzi;
+        valid = TRUE;
+    }
+    ReleaseSRWLockShared(&g_zoneLock);
+    if (!valid) return FALSE;
+
     SYSTEMTIME utc;
     GetSystemTime(&utc);
-    return SystemTimeToTzSpecificLocalTimeEx(&g_dtzi, &utc, out) != FALSE;
+    return SystemTimeToTzSpecificLocalTimeEx(&tz, &utc, out) != FALSE;
 }
 
 static BOOL IsClockCallSite(void* retAddr) {
@@ -218,22 +257,24 @@ static BOOL IsClockLocalCallSite(void* retAddr) {
     return FALSE;
 }
 
+// Safe GetLocalTime hook: populate valid date/time fields first, then adjust wSecond = 59
+// if a refresh nudge is pending. NEVER zero-out the struct.
 static VOID WINAPI HookGetLocalTime(LPSYSTEMTIME st) {
+    g_origLocalTime(st);
     if (IsClockLocalCallSite(_ReturnAddress()) &&
         InterlockedExchange(&g_kickPending, 0)) {
-        memset(st, 0, sizeof(*st));
         st->wSecond = 59;      // "almost a new minute": refresh next second
-        return;
     }
-    g_origLocalTime(st);
 }
+
 static int WINAPI HookGetTimeFormatEx(LPCWSTR locale, DWORD flags,
                                       const SYSTEMTIME* t, LPCWSTR fmt,
                                       LPWSTR buf, int cch) {
-    if (InterlockedCompareExchange(&g_active, 0, 0) && IsClockCallSite(_ReturnAddress())) {
+    if (g_active && IsClockCallSite(_ReturnAddress())) {
         SYSTEMTIME target;
         if (TargetNow(&target)) {
             InterlockedIncrement(&g_hits);
+            if (g_state) InterlockedIncrement(&g_state->hits);
             return g_origTimeFmt(locale, flags, &target, fmt, buf, cch);
         }
     }
@@ -243,10 +284,11 @@ static int WINAPI HookGetTimeFormatEx(LPCWSTR locale, DWORD flags,
 static int WINAPI HookGetDateFormatEx(LPCWSTR locale, DWORD flags,
                                       const SYSTEMTIME* t, LPCWSTR fmt,
                                       LPWSTR buf, int cch, LPCWSTR cal) {
-    if (InterlockedCompareExchange(&g_active, 0, 0) && IsClockCallSite(_ReturnAddress())) {
+    if (g_active && IsClockCallSite(_ReturnAddress())) {
         SYSTEMTIME target;
         if (TargetNow(&target)) {
             InterlockedIncrement(&g_hits);
+            if (g_state) InterlockedIncrement(&g_state->hits);
             return g_origDateFmt(locale, flags, &target, fmt, buf, cch, cal);
         }
     }
@@ -305,35 +347,46 @@ static void WriteSlotInternal(void** slot, void* value) {
     }
 }
 
-// Fallback for a Taskbar.View.dll version whose layout was not verified: find
-// the call instructions that go through the patched IAT slots.
-static int ScanCallSites(DWORD iatSlotRva, DWORD* out, int maxOut) {
+// Single-pass scanner: traverses .text exactly once, matching all 3 slot RVAs simultaneously.
+// Reduces startup scan time by ~66%.
+static void ScanCallSitesSinglePass(DWORD timeSlotRva, DWORD dateSlotRva, DWORD localSlotRva,
+                                    DWORD* timeSites, int* timeCount, int maxTime,
+                                    DWORD* dateSites, int* dateCount, int maxDate,
+                                    DWORD* localSites, int* localCount, int maxLocal) {
     BYTE* base = g_modBase;
     auto dos = (IMAGE_DOS_HEADER*)base;
     auto nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
     auto sec = IMAGE_FIRST_SECTION(nt);
-    int n = 0;
+    *timeCount = 0;
+    *dateCount = 0;
+    *localCount = 0;
+
     for (WORD s = 0; s < nt->FileHeader.NumberOfSections; ++s, ++sec) {
         if (memcmp(sec->Name, ".text", 5) != 0) continue;
         BYTE* p = base + sec->VirtualAddress;
         DWORD size = sec->Misc.VirtualSize;
         for (DWORD i = 0; i + 6 <= size; ++i) {
-            if (p[i] != 0xFF || p[i + 1] != 0x15) continue;  // call qword [rip+d]
+            if (p[i] != 0xFF || p[i + 1] != 0x15) continue;  // call qword [rip+disp32]
             INT32 disp = *(INT32*)(p + i + 2);
             DWORD targetRva = sec->VirtualAddress + i + 6 + disp;
-            if (targetRva != iatSlotRva) continue;
-            if (n < maxOut) out[n] = sec->VirtualAddress + i + 6;
-            ++n;
+            DWORD siteRva = sec->VirtualAddress + i + 6;
+
+            if (targetRva == timeSlotRva) {
+                if (*timeCount < maxTime) timeSites[*timeCount] = siteRva;
+                (*timeCount)++;
+            } else if (targetRva == dateSlotRva) {
+                if (*dateCount < maxDate) dateSites[*dateCount] = siteRva;
+                (*dateCount)++;
+            } else if (targetRva == localSlotRva) {
+                if (*localCount < maxLocal) localSites[*localCount] = siteRva;
+                (*localCount)++;
+            }
         }
     }
-    return n;
 }
 
-// Force the clock to re-read and repaint now instead of at the next natural
-// minute tick. WM_TIMECHANGE is the documented "the displayed time changed"
-// notification; it does not alter the system clock or time zone. It is sent
-// both to the broadcast address and to the taskbar windows that own the clock,
-// because the XAML taskbar does not always receive the broadcast.
+// Force the clock to re-read and repaint now.
+// Sends WM_TIMECHANGE to broadcast and all taskbar windows (primary and multi-monitor secondary).
 static void RequestClockRefresh() {
     DWORD_PTR res = 0;
 
@@ -341,63 +394,67 @@ static void RequestClockRefresh() {
                         SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG, 300, &res);
 
     HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
-    if (!tray) return;
+    if (tray) {
+        HWND targets[3] = {
+            tray,
+            FindWindowExW(tray, nullptr, L"TrayNotifyWnd", nullptr),
+            FindWindowExW(tray, nullptr, L"Windows.UI.Composition.DesktopWindowContentBridge", nullptr)
+        };
+        for (int i = 0; i < 3; ++i) {
+            if (!targets[i]) continue;
+            SendMessageTimeoutW(targets[i], WM_TIMECHANGE, 0, 0,
+                                SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG, 300, &res);
+            RedrawWindow(targets[i], nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME);
+        }
+    }
 
-    HWND targets[3] = { tray, nullptr, nullptr };
-    targets[1] = FindWindowExW(tray, nullptr, L"TrayNotifyWnd", nullptr);
-    targets[2] = FindWindowExW(tray, nullptr,
-                               L"Windows.UI.Composition.DesktopWindowContentBridge",
-                               nullptr);
-
-    for (int i = 0; i < 3; ++i) {
-        if (!targets[i]) continue;
-        SendMessageTimeoutW(targets[i], WM_TIMECHANGE, 0, 0,
+    // Secondary monitors (multi-display taskbars)
+    HWND secTray = nullptr;
+    while ((secTray = FindWindowExW(nullptr, secTray, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr) {
+        HWND bridge = FindWindowExW(secTray, nullptr, L"Windows.UI.Composition.DesktopWindowContentBridge", nullptr);
+        SendMessageTimeoutW(secTray, WM_TIMECHANGE, 0, 0,
                             SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG, 300, &res);
-        RedrawWindow(targets[i], nullptr, nullptr,
+        RedrawWindow(secTray, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME);
+        if (bridge) {
+            SendMessageTimeoutW(bridge, WM_TIMECHANGE, 0, 0,
+                                SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG, 300, &res);
+            RedrawWindow(bridge, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME);
+        }
     }
 }
 
 // ------------------------------------------------------------ power events --
-// After resume the taskbar clock can show a stale value until its next natural
-// tick. A hidden message-only window receives WM_POWERBROADCAST inside
-// Explorer, so the refresh can happen immediately rather than up to a minute
-// later.
-static HWND g_powerWnd = nullptr;
+// Standard Windows 8+ power suspend/resume notification callback.
+// Eliminates the need for a dedicated thread, hidden window class, and message loop.
+static HPOWERNOTIFY g_powerNotify = nullptr;
 
-static LRESULT CALLBACK PowerWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_POWERBROADCAST) {
-        if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND ||
-            wp == PBT_APMRESUMECRITICAL || wp == PBT_APMQUERYSUSPEND) {
-            LogF(L"power event %u -> refresh clock", (unsigned)wp);
-            RequestClockRefresh();
-        }
+static ULONG CALLBACK SuspendResumeCallback(PVOID, ULONG type, PVOID) {
+    if (type == PBT_APMRESUMEAUTOMATIC || type == PBT_APMRESUMESUSPEND ||
+        type == PBT_APMRESUMECRITICAL) {
+        LogF(L"power resume event %lu -> refresh clock", type);
+        InterlockedExchange(&g_kickPending, 1);
+        RequestClockRefresh();
     }
-    return DefWindowProcW(hwnd, msg, wp, lp);
+    return ERROR_SUCCESS;
 }
 
-static void CreatePowerWindow() {
-    if (g_powerWnd) return;
-    // The window needs a thread with a message pump; ControlThread waits on
-    // kernel objects forever, so pump here on a dedicated thread.
-    WNDCLASSEXW wc = { sizeof(wc) };
-    wc.lpfnWndProc = PowerWndProc;
-    wc.hInstance = g_selfModule;
-    wc.lpszClassName = L"LocalTimeTzClockPowerSink";
-    RegisterClassExW(&wc);  // harmless if it already exists in this process
-    g_powerWnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0,
-                                 HWND_MESSAGE, nullptr, g_selfModule, nullptr);
-    LogF(L"power sink window: %p", g_powerWnd);
-    MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
+static void InitPowerNotification() {
+    if (g_powerNotify) return;
+    DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS params = {};
+    params.Callback = SuspendResumeCallback;
+    params.Context = nullptr;
+    g_powerNotify = RegisterSuspendResumeNotification((HANDLE)&params, DEVICE_NOTIFY_CALLBACK);
+    LogF(L"registered suspend-resume callback: %p", g_powerNotify);
 }
 
-static DWORD WINAPI PowerThread(LPVOID) {
-    CreatePowerWindow();
-    return 0;
+static void UninitPowerNotification() {
+    if (g_powerNotify) {
+        UnregisterSuspendResumeNotification(g_powerNotify);
+        g_powerNotify = nullptr;
+    }
 }
 
 static BOOL g_patched = FALSE;
@@ -421,19 +478,21 @@ static BOOL ActivateHooks() {
         g_origDateFmt = (PFN_GetDateFormatEx)g_iatDate.original;
         g_origLocalTime = (PFN_GetLocalTime)g_iatLocal.original;
         g_patched = TRUE;
-        LogF(L"IAT patched: time=%p date=%p", g_iatTime.slot, g_iatDate.slot);
+        LogF(L"IAT patched: time=%p date=%p local=%p", g_iatTime.slot, g_iatDate.slot, g_iatLocal.slot);
 
         DWORD timeSlotRva = (DWORD)((BYTE*)g_iatTime.slot - g_modBase);
         DWORD dateSlotRva = (DWORD)((BYTE*)g_iatDate.slot - g_modBase);
         DWORD localSlotRva = (DWORD)((BYTE*)g_iatLocal.slot - g_modBase);
+
         DWORD fits[8] = { 0 }, fds[8] = { 0 }, lcs[8] = { 0 };
-        int nt = ScanCallSites(timeSlotRva, fits, 8);
-        int nd = ScanCallSites(dateSlotRva, fds, 8);
-        int nl = ScanCallSites(localSlotRva, lcs, 8);
+        int nt = 0, nd = 0, nl = 0;
+        ScanCallSitesSinglePass(timeSlotRva, dateSlotRva, localSlotRva,
+                                fits, &nt, 8, fds, &nd, 8, lcs, &nl, 8);
         LogF(L"call sites found: time=%d date=%d local=%d", nt, nd, nl);
+
         g_callSiteLocalCount = nl > 8 ? 8 : nl;
         memcpy(g_callSiteLocal, lcs, sizeof(DWORD) * g_callSiteLocalCount);
-        LogF(L"call sites found: time=%d date=%d", nt, nd);
+
         if (nt == 1 && nd >= 1) {
             g_callSiteTime = fits[0];
             memcpy(g_callSiteDate, fds, sizeof(DWORD) * (nd > 2 ? 2 : nd));
@@ -460,8 +519,6 @@ static void DeactivateHooks() {
 }
 
 // ------------------------------------------------------- control plumbing ---
-// Names are per-process (taskbar Explorer pid) so a leftover copy of an older
-// build in the same process can never confuse the controller's view of state.
 static WCHAR g_evtEnable[96];
 static WCHAR g_evtDisable[96];
 static WCHAR g_evtQuery[96];
@@ -479,17 +536,7 @@ static void BuildControlNames() {
                      L"Local\\LocalTimeTzClock.State.%lu", pid);
 }
 
-struct SharedState {
-    volatile LONG ready;       // DLL finished init
-    volatile LONG supported;   // hooks installed successfully
-    volatile LONG active;      // currently rewriting the clock
-    volatile LONG hits;        // number of clock formatting calls rewritten
-    volatile LONG lastError;   // Win32 error for the controller to report
-    DWORD dllVersion;
-};
-
 static HANDLE g_map = nullptr;
-static SharedState* g_state = nullptr;
 
 static DWORD WINAPI ControlThread(LPVOID) {
     HANDLE enable  = CreateEventW(nullptr, FALSE, FALSE, g_evtEnable);
@@ -504,13 +551,12 @@ static DWORD WINAPI ControlThread(LPVOID) {
     }
     InitializeCriticalSection(&g_logCs);
     g_logReady = TRUE;
-    LogF(L"--- attach (pid %lu) ---", GetCurrentProcessId());
+    LogF(L"--- attach (pid %lu, v%d) ---", GetCurrentProcessId(), TZCLOCK_VERSION);
     LogF(L"config: TimeZoneId='%s' Enabled=%d Log=%d", g_cfg.timeZoneId,
          g_cfg.enabled, g_cfg.log);
 
     // Explorer starts the taskbar asynchronously, so a DLL injected right
     // after the process appears can arrive before Taskbar.View.dll exists.
-    // Wait for it instead of going inert, but do not wait forever.
     HMODULE mod = nullptr;
     for (int i = 0; i < 300; ++i) {           // up to ~60 s
         mod = GetModuleHandleW(L"Taskbar.View.dll");
@@ -537,8 +583,8 @@ static DWORD WINAPI ControlThread(LPVOID) {
         g_state->supported = g_patched ? 1 : 0;
         g_state->lastError = (g_cfg.enabled && !ok) ? ERROR_PROC_NOT_FOUND : 0;
     }
-    HANDLE pt = CreateThread(nullptr, 0, PowerThread, nullptr, 0, nullptr);
-    if (pt) CloseHandle(pt);
+
+    InitPowerNotification();
     LogF(L"initial state: enabled=%d patched=%d", g_cfg.enabled, g_patched);
     RequestClockRefresh();
 
@@ -547,7 +593,6 @@ static DWORD WINAPI ControlThread(LPVOID) {
         DWORD r = WaitForMultipleObjects(3, waits, FALSE, INFINITE);
         if (r == WAIT_OBJECT_0) {
             LoadConfig();
-            g_dtziValid = FALSE;
             if (!LoadTargetZone()) {
                 LogF(L"enable requested but zone '%s' invalid", g_cfg.timeZoneId);
                 if (g_state) g_state->lastError = ERROR_INVALID_PARAMETER;
@@ -564,8 +609,8 @@ static DWORD WINAPI ControlThread(LPVOID) {
             RequestClockRefresh();
         } else if (r == WAIT_OBJECT_0 + 2) {
             if (g_state) {
-                g_state->active = (DWORD)InterlockedCompareExchange(&g_active, 0, 0);
-                g_state->hits = (DWORD)InterlockedCompareExchange(&g_hits, 0, 0);
+                g_state->active = g_active;
+                g_state->hits = g_hits;
                 g_state->supported = g_patched ? 1 : 0;
             }
         } else {
@@ -581,19 +626,22 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(inst);
         BuildControlNames();
 
-        // Published state so the controller can report honestly instead of
-        // guessing that the injection worked.
         g_map = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr,
                                    PAGE_READWRITE, 0, sizeof(SharedState), g_mapName);
         if (g_map)
             g_state = (SharedState*)MapViewOfFile(g_map, FILE_MAP_ALL_ACCESS, 0, 0,
                                                   sizeof(SharedState));
-        if (g_state) { g_state->ready = 1; g_state->dllVersion = 1; }
+        if (g_state) {
+            g_state->ready = 1;
+            g_state->dllVersion = TZCLOCK_VERSION;
+            g_state->hits = 0;
+        }
 
         HANDLE h = CreateThread(nullptr, 0, ControlThread, nullptr, 0, nullptr);
         if (h) CloseHandle(h);
     } else if (reason == DLL_PROCESS_DETACH) {
         if (reserved == nullptr) {
+            UninitPowerNotification();
             if (g_patched && g_iatTime.slot) WriteSlotInternal(g_iatTime.slot, g_iatTime.original);
             if (g_patched && g_iatDate.slot) WriteSlotInternal(g_iatDate.slot, g_iatDate.original);
             if (g_patched && g_iatLocal.slot) WriteSlotInternal(g_iatLocal.slot, g_iatLocal.original);

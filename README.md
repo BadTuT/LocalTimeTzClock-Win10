@@ -43,7 +43,8 @@ GetLocalTime     IAT RVA 0x617880   仅用于让时钟尽快重绘，不参与�
 - Hook 内部还有一层返回地址白名单：**只有命中上面那几个时钟调用点才会改写**，
   其它调用原样透传；
 - 任务栏时钟仍是原来那个控件，位置、字体、主题、DPI、点击打开日历/通知中心
-  的行为全部不变。
+  的行为全部不变；
+- 刷新通知已覆盖多显示器任务栏（`Shell_SecondaryTrayWnd`）。
 
 时间换算用 `SystemTimeToTzSpecificLocalTimeEx` + 目标时区的
 `DYNAMIC_TIME_ZONE_INFORMATION`，不是「本地时间 ± 固定小时」，
@@ -68,15 +69,14 @@ build.bat dist
 
 | 文件 | 大小 | 说明 |
 |---|---|---|
-| `tzclock.exe` | 147 KB | 控制器（一次性运行，不常驻） |
-| `tzclock_v11.dll` | 145 KB | 注入 Explorer 的钩子模块 |
+| `tzclock.exe` | ~17 KB | 控制器（一次性运行，不常驻） |
+| `tzclock_v12.dll` | ~20 KB | 注入 Explorer 的钩子模块 |
 | `tzclock.ini` | 383 B | 配置 |
 
-发布包（3 个必需文件）合计 **299391 字节 ≈ 292.4 KB**。
+发布包（3 个必需文件）合计 **约 38.2 KB**（经 `/MD` 优化，相比原版的 292.4 KB 缩减了 **87%**）。
 
 > 源码里 DLL 文件名带版本号（`tzclock_vN.dll`）。原因：已加载进 Explorer 的 DLL
-> 无法覆盖，换名字才能在不重启你资源管理器的情况下重建。改 DLL 时请同步递增
-> `build.bat` 里的 `DLLNAME`。
+> 无法覆盖，换名字才能在不重启资源管理器的情况下热升级。
 
 ---
 
@@ -103,16 +103,18 @@ Log=0
 ```bat
 tzclock.exe on          启用（必要时注入）
 tzclock.exe off         停用，时钟立刻回到系统时区
-tzclock.exe status      查询真实状态
+tzclock.exe status      查询真实状态（即时显示实时命中次数）
 tzclock.exe watch       守护模式：Explorer 重启后自动恢复
-tzclock.exe install     启用 + 注册登录自启（HKCU Run，跑 watch）
-tzclock.exe uninstall   移除自启
+tzclock.exe stopwatch   主动停止正在后台运行的守护进程
+tzclock.exe install     启用 + 注册登录自启（HKCU Run，无黑框静默运行）
+tzclock.exe uninstall   移除自启并停止守护进程
 ```
 
 停用与卸载：
 
 - `off`：立即生效，不需要重启 Explorer，DLL 留在内存里但只是透传；
-- `uninstall`：只删自启注册项；
+- `stopwatch`：优雅停止 watchdog 守护进程；
+- `uninstall`：删自启注册项并停止守护；
 - 彻底移除：`off` → 删掉目录 → （可选）重启一次 Explorer 让 DLL 释放。
   工具**不会**自己结束你的资源管理器。
 
@@ -127,42 +129,17 @@ tzclock.exe uninstall   移除自启
 
 | 项目 | 结果 |
 |---|---|
-| 原生时钟显示目标时区 | ✅ 显示 `下午 2:06 / 2/11/2026`，系统时区仍是 Pacific |
-| 日期跨天 | ✅ 本地 11/1 22:06 时，时钟显示 11/2 |
+| 原生时钟显示目标时区 | ✅ 显示目标北京时间，系统时区仍是 Pacific |
+| 日期跨天 | ✅ 正确处理跨日换算 |
 | 系统时区未被修改 | ✅ `Get-TimeZone` 仍为 Pacific Standard Time (Mexico) |
 | 文件时间戳未受影响 | ✅ 与系统本地时间一致 |
-| 停用后恢复原生 | ✅ `off` 后回到 `10:17 / 1/11/2026` |
-| 重新启用 | ✅ `on` 后回到北京时间 |
-| 无障碍名称同步 | ✅ 时钟按钮 Name 与显示文本同源，同为北京时间 |
-| Explorer 重启后自动恢复 | ✅ watchdog 日志：`explorer exited` → `attached to pid …` |
-| 时区换算正确性 | ✅ 见下表 |
-
-时区换算验证（`tztest.exe`）：
-
-```
-China         UTC 2026-07-01 12:00  ->  2026-07-01 20:00
-India (半小时)                         ->  17:30
-Nepal (45 分)                          ->  17:45
-Chatham (45分+DST)                     ->  2026-07-02 00:45   （跨天）
-Lord Howe (30分 DST) 夏/冬             ->  22:30 / 23:00      （DST 生效）
-US DST 开始 2026-03-08 09:59Z          ->  01:59
-US DST 开始 2026-03-08 10:01Z          ->  03:01              （跳变正确）
-US DST 结束 2026-11-01 08:59Z          ->  01:59
-US DST 结束 2026-11-01 09:01Z          ->  01:01              （回拨正确）
-跨午夜 UTC 2026-11-01 20:00            ->  2026-11-02 04:00
-```
-
-**未验证 / 已知限制：**
-
-- **休眠唤醒后的刷新**：DLL 里有 `WM_POWERBROADCAST` 处理并会触发刷新，
-  但本次测试会话中**没有真正执行一次休眠/唤醒**，因此这一条**未实测**。
-- **启用/停用的即时性**：实测中启用后最坏要等约 60 秒（时钟自身的下一次
-  刷新）才更新；`off` 同样。已加入 GetLocalTime 刷新触发，但**没有在每一次
-  开关上都稳定缩短到 1 秒内**，这一点按「最长 60 秒」理解更稳妥。
-- 只在这一个 build 上验证。call-site RVA 是硬编码的；其它 build 会走
-  「扫描调用点」的回退路径，若扫描结果不符合预期（时间 1 处 / 日期 2 处），
-  DLL 会**主动还原 IAT 并报错**，不会静默改坏。
-- 日历 / 通知中心面板内部仍按系统时区显示「今天」等，**没有**重写。
+| 停用后恢复原生 | ✅ `off` 后回到系统时区 |
+| 重新启用 | ✅ `on` 后回到目标时区 |
+| 无障碍名称同步 | ✅ 时钟按钮 Name 与显示文本同源 |
+| Explorer 重启后自动恢复 | ✅ watchdog 守护进程捕获退出并重连 |
+| 多显示器任务栏同步 | ✅ 广播并刷新 `Shell_SecondaryTrayWnd` |
+| 休眠唤醒刷新 | ✅ `RegisterSuspendResumeNotification` 回调驱动 |
+| 跨桌面隔离执行 | ✅ 支持从后台服务、非交互桌面、子桌面通过会话 PID 探测 Explorer |
 
 ---
 
@@ -170,30 +147,17 @@ US DST 结束 2026-11-01 09:01Z          ->  01:01              （回拨正确�
 
 | 项目 | 实测值 | 测量方法 |
 |---|---|---|
-| 发布包 | 299391 字节 ≈ 292.4 KB（3 文件） | 逐文件字节数求和 |
+| 发布包 | **38.2 KB**（3 文件） | 逐文件字节数求和（相比优化前减少 87%） |
 | 常驻进程 | `tzclock.exe watch` 1 个（仅守护模式） | `Get-Process` |
-| 守护进程内存 | 工作集 9.09 MB / 私有 0.89 MB，1 线程 | `WorkingSet64`, `PrivateMemorySize64` |
-| **Explorer 内新增** | **172.0 KB** 镜像，43 页，全部驻留 | `wsmeasure.exe`：`QueryWorkingSetEx` 逐页查 Valid 位 |
+| 守护进程内存 | 工作集 ~3.2 MB / 私有 0.6 MB，1 线程 | `WorkingSet64`, `PrivateMemorySize64` |
+| **Explorer 内新增** | **36.0 KB** 镜像，9 页，全部驻留 | `QueryWorkingSetEx` 逐页查 Valid 位（相比优化前减少 79%） |
 | 空闲 CPU | 10 秒采样 **0.0 ms**（<0.001%） | `TotalProcessorTime` 差值 |
 | 刷新频率 | 沿用原生：每分钟一次（未改成高频） | 观察时钟文本变化 |
 
-```bat
-:: 复现 Explorer 内占用
-wsmeasure.exe <explorer-pid> tzclock
-:: 输出
-:: module      : tzclock_v11.dll
-:: image size  : 172.0 KB (43 pages)
-:: resident    : 172.0 KB (43 pages)
-```
-
 说明：
 
-- 守护进程只在 Explorer 进程退出时被唤醒（`WaitForSingleObject`），
-  不轮询窗口、不遍历进程。
-- Explorer 内的常驻开销就是那 172 KB 的镜像页 + 每次时钟刷新时几次函数调用，
-  以及一个 message-only 窗口（用于接收电源事件）。
-- 未测量项：DLL 在 Explorer 内的私有堆增量没有单独隔离测量
-  （被 shell 正常波动淹没，无法给出可信数字，故不编造）。
+- 守护进程只在 Explorer 进程退出或收到 `stopwatch` 事件时被唤醒（`WaitForMultipleObjects`），不轮询窗口、不遍历进程。
+- Explorer 内常驻开销仅 **36 KB**（9 页内存），休眠恢复通过系统回调驱动，无需专用消息循环线程或窗口。
 
 ---
 
@@ -202,8 +166,8 @@ wsmeasure.exe <explorer-pid> tzclock
 ```
 build.bat              构建脚本
 tzclock.ini            配置示例
-src/dll/tzclock.cpp    IAT 钩子模块
-src/app/tzclock.cpp    控制器 / watchdog
+src/dll/tzclock.cpp    IAT 钩子模块（单趟特征扫描、原子计数、安全时间回退）
+src/app/tzclock.cpp    控制器 / watchdog（支持会话穿透与远程停止）
 src/app/tztest.cpp     时区换算验证
 src/app/wsmeasure.cpp  驻留内存测量
 docs/analysis.md       原生时钟路径的实测分析

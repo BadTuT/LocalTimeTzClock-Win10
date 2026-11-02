@@ -8,14 +8,14 @@ REM cannot be overwritten, so a fresh file name lets us rebuild without
 REM restarting the user's Explorer. Bump it whenever the DLL changes.
 set OUTDIR=%~1
 if "%OUTDIR%"=="" set OUTDIR=dist
-set DLLNAME=tzclock_v11.dll
+set DLLNAME=tzclock_v12.dll
 
 call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1
 if errorlevel 1 ( echo VCVARS_FAIL & exit /b 1 )
 
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
-set CFLAGS=/nologo /c /O1 /Os /GS- /GR- /EHs-c- /DNDEBUG /W3 /MT /utf-8
+set CFLAGS=/nologo /c /O1 /Os /GS- /GR- /EHs-c- /DNDEBUG /W3 /MD /utf-8
 set LDFLAGS=/nologo /RELEASE /OPT:REF /OPT:ICF /INCREMENTAL:NO
 
 cl %CFLAGS% /Fo:"%OUTDIR%\tzclock_dll.obj" src\dll\tzclock.cpp
