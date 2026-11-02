@@ -29,6 +29,7 @@ typedef int (WINAPI* PFN_GetTimeFormatEx)(LPCWSTR, DWORD, const SYSTEMTIME*,
                                           LPCWSTR, LPWSTR, int);
 typedef int (WINAPI* PFN_GetDateFormatEx)(LPCWSTR, DWORD, const SYSTEMTIME*,
                                           LPCWSTR, LPWSTR, int, LPCWSTR);
+typedef VOID (WINAPI* PFN_GetLocalTime)(LPSYSTEMTIME);
 
 // ------------------------------------------------------------------ config --
 static HMODULE g_selfModule = nullptr;
@@ -157,6 +158,7 @@ static void LogF(const WCHAR* fmt, ...) {
 // ------------------------------------------------------------ target zone ---
 static PFN_GetTimeFormatEx g_origTimeFmt = nullptr;
 static PFN_GetDateFormatEx g_origDateFmt = nullptr;
+static PFN_GetLocalTime   g_origLocalTime = nullptr;
 
 static BYTE* g_modBase = nullptr;
 static DWORD g_callSiteTime = 0;
@@ -167,6 +169,14 @@ static DYNAMIC_TIME_ZONE_INFORMATION g_dtzi;
 static BOOL g_dtziValid = FALSE;
 static volatile LONG g_active = 0;
 static volatile LONG g_hits = 0;
+
+// Set when the user flips the clock on/off. While it is set, the next
+// GetLocalTime performed by the clock's own refresh routine is answered with
+// second = 59, which makes the clock schedule its next update one second later
+// instead of a full minute. Cleared as soon as it has been consumed once.
+static volatile LONG g_kickPending = 0;
+static DWORD g_callSiteLocal[8] = { 0 };
+static int   g_callSiteLocalCount = 0;
 
 static BOOL LoadTargetZone() {
     for (DWORD i = 0;; ++i) {
@@ -201,6 +211,22 @@ static BOOL IsClockCallSite(void* retAddr) {
 }
 
 // ------------------------------------------------------------------ hooks ---
+static BOOL IsClockLocalCallSite(void* retAddr) {
+    DWORD rva = (DWORD)((BYTE*)retAddr - g_modBase);
+    for (int i = 0; i < g_callSiteLocalCount; ++i)
+        if (rva == g_callSiteLocal[i]) return TRUE;
+    return FALSE;
+}
+
+static VOID WINAPI HookGetLocalTime(LPSYSTEMTIME st) {
+    if (IsClockLocalCallSite(_ReturnAddress()) &&
+        InterlockedExchange(&g_kickPending, 0)) {
+        memset(st, 0, sizeof(*st));
+        st->wSecond = 59;      // "almost a new minute": refresh next second
+        return;
+    }
+    g_origLocalTime(st);
+}
 static int WINAPI HookGetTimeFormatEx(LPCWSTR locale, DWORD flags,
                                       const SYSTEMTIME* t, LPCWSTR fmt,
                                       LPWSTR buf, int cch) {
@@ -232,6 +258,7 @@ struct IatEntry { void** slot; void* original; };
 
 static IatEntry g_iatTime = { nullptr, nullptr };
 static IatEntry g_iatDate = { nullptr, nullptr };
+static IatEntry g_iatLocal = { nullptr, nullptr };
 
 static int PatchImport(const char* moduleName, const char* funcName,
                        void* replacement, IatEntry* found) {
@@ -302,13 +329,33 @@ static int ScanCallSites(DWORD iatSlotRva, DWORD* out, int maxOut) {
     return n;
 }
 
-// Ask the shell to repaint the clock right away instead of waiting for the
-// next natural minute tick. WM_TIMECHANGE is the documented notification that a
-// clock display should be refreshed; it does not change the system time.
+// Force the clock to re-read and repaint now instead of at the next natural
+// minute tick. WM_TIMECHANGE is the documented "the displayed time changed"
+// notification; it does not alter the system clock or time zone. It is sent
+// both to the broadcast address and to the taskbar windows that own the clock,
+// because the XAML taskbar does not always receive the broadcast.
 static void RequestClockRefresh() {
     DWORD_PTR res = 0;
+
     SendMessageTimeoutW(HWND_BROADCAST, WM_TIMECHANGE, 0, 0,
-                        SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG, 200, &res);
+                        SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG, 300, &res);
+
+    HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!tray) return;
+
+    HWND targets[3] = { tray, nullptr, nullptr };
+    targets[1] = FindWindowExW(tray, nullptr, L"TrayNotifyWnd", nullptr);
+    targets[2] = FindWindowExW(tray, nullptr,
+                               L"Windows.UI.Composition.DesktopWindowContentBridge",
+                               nullptr);
+
+    for (int i = 0; i < 3; ++i) {
+        if (!targets[i]) continue;
+        SendMessageTimeoutW(targets[i], WM_TIMECHANGE, 0, 0,
+                            SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG, 300, &res);
+        RedrawWindow(targets[i], nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME);
+    }
 }
 
 // ------------------------------------------------------------ power events --
@@ -361,22 +408,31 @@ static BOOL ActivateHooks() {
                             "GetTimeFormatEx", (void*)HookGetTimeFormatEx, &g_iatTime);
         int b = PatchImport("api-ms-win-core-datetime-l1-1-1.dll",
                             "GetDateFormatEx", (void*)HookGetDateFormatEx, &g_iatDate);
-        if (a != 1 || b != 1) {
-            LogF(L"ERROR: IAT patch failed (time=%d date=%d)", a, b);
+        int c = PatchImport("api-ms-win-core-sysinfo-l1-1-0.dll",
+                            "GetLocalTime", (void*)HookGetLocalTime, &g_iatLocal);
+        if (a != 1 || b != 1 || c != 1) {
+            LogF(L"ERROR: IAT patch failed (time=%d date=%d local=%d)", a, b, c);
             if (a == 1) WriteSlotInternal(g_iatTime.slot, g_iatTime.original);
             if (b == 1) WriteSlotInternal(g_iatDate.slot, g_iatDate.original);
+            if (c == 1) WriteSlotInternal(g_iatLocal.slot, g_iatLocal.original);
             return FALSE;
         }
         g_origTimeFmt = (PFN_GetTimeFormatEx)g_iatTime.original;
         g_origDateFmt = (PFN_GetDateFormatEx)g_iatDate.original;
+        g_origLocalTime = (PFN_GetLocalTime)g_iatLocal.original;
         g_patched = TRUE;
         LogF(L"IAT patched: time=%p date=%p", g_iatTime.slot, g_iatDate.slot);
 
         DWORD timeSlotRva = (DWORD)((BYTE*)g_iatTime.slot - g_modBase);
         DWORD dateSlotRva = (DWORD)((BYTE*)g_iatDate.slot - g_modBase);
-        DWORD fits[8] = { 0 }, fds[8] = { 0 };
+        DWORD localSlotRva = (DWORD)((BYTE*)g_iatLocal.slot - g_modBase);
+        DWORD fits[8] = { 0 }, fds[8] = { 0 }, lcs[8] = { 0 };
         int nt = ScanCallSites(timeSlotRva, fits, 8);
         int nd = ScanCallSites(dateSlotRva, fds, 8);
+        int nl = ScanCallSites(localSlotRva, lcs, 8);
+        LogF(L"call sites found: time=%d date=%d local=%d", nt, nd, nl);
+        g_callSiteLocalCount = nl > 8 ? 8 : nl;
+        memcpy(g_callSiteLocal, lcs, sizeof(DWORD) * g_callSiteLocalCount);
         LogF(L"call sites found: time=%d date=%d", nt, nd);
         if (nt == 1 && nd >= 1) {
             g_callSiteTime = fits[0];
@@ -388,16 +444,19 @@ static BOOL ActivateHooks() {
             LogF(L"ERROR: unexpected call-site layout (%d/%d), staying inert", nt, nd);
             WriteSlotInternal(g_iatTime.slot, g_iatTime.original);
             WriteSlotInternal(g_iatDate.slot, g_iatDate.original);
+            WriteSlotInternal(g_iatLocal.slot, g_iatLocal.original);
             g_patched = FALSE;
             return FALSE;
         }
     }
     InterlockedExchange(&g_active, 1);
+    InterlockedExchange(&g_kickPending, 1);
     return TRUE;
 }
 
 static void DeactivateHooks() {
     InterlockedExchange(&g_active, 0);
+    InterlockedExchange(&g_kickPending, 1);   // make it repaint now, not in a minute
 }
 
 // ------------------------------------------------------- control plumbing ---
@@ -537,6 +596,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         if (reserved == nullptr) {
             if (g_patched && g_iatTime.slot) WriteSlotInternal(g_iatTime.slot, g_iatTime.original);
             if (g_patched && g_iatDate.slot) WriteSlotInternal(g_iatDate.slot, g_iatDate.original);
+            if (g_patched && g_iatLocal.slot) WriteSlotInternal(g_iatLocal.slot, g_iatLocal.original);
             LogF(L"--- detach ---");
         }
     }
