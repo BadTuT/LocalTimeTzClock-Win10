@@ -11,3 +11,4 @@ ref/
 *.exe
 *.log
 *.txt
+__pycache__/
