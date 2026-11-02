@@ -303,12 +303,54 @@ static int ScanCallSites(DWORD iatSlotRva, DWORD* out, int maxOut) {
 }
 
 // Ask the shell to repaint the clock right away instead of waiting for the
-// next natural minute tick. WM_TIMECHANGE changes nothing; it is the
-// documented notification apps use to refresh displayed time.
+// next natural minute tick. WM_TIMECHANGE is the documented notification that a
+// clock display should be refreshed; it does not change the system time.
 static void RequestClockRefresh() {
     DWORD_PTR res = 0;
     SendMessageTimeoutW(HWND_BROADCAST, WM_TIMECHANGE, 0, 0,
                         SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG, 200, &res);
+}
+
+// ------------------------------------------------------------ power events --
+// After resume the taskbar clock can show a stale value until its next natural
+// tick. A hidden message-only window receives WM_POWERBROADCAST inside
+// Explorer, so the refresh can happen immediately rather than up to a minute
+// later.
+static HWND g_powerWnd = nullptr;
+
+static LRESULT CALLBACK PowerWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_POWERBROADCAST) {
+        if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND ||
+            wp == PBT_APMRESUMECRITICAL || wp == PBT_APMQUERYSUSPEND) {
+            LogF(L"power event %u -> refresh clock", (unsigned)wp);
+            RequestClockRefresh();
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void CreatePowerWindow() {
+    if (g_powerWnd) return;
+    // The window needs a thread with a message pump; ControlThread waits on
+    // kernel objects forever, so pump here on a dedicated thread.
+    WNDCLASSEXW wc = { sizeof(wc) };
+    wc.lpfnWndProc = PowerWndProc;
+    wc.hInstance = g_selfModule;
+    wc.lpszClassName = L"LocalTimeTzClockPowerSink";
+    RegisterClassExW(&wc);  // harmless if it already exists in this process
+    g_powerWnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0,
+                                 HWND_MESSAGE, nullptr, g_selfModule, nullptr);
+    LogF(L"power sink window: %p", g_powerWnd);
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
+
+static DWORD WINAPI PowerThread(LPVOID) {
+    CreatePowerWindow();
+    return 0;
 }
 
 static BOOL g_patched = FALSE;
@@ -359,10 +401,24 @@ static void DeactivateHooks() {
 }
 
 // ------------------------------------------------------- control plumbing ---
-#define EVT_ENABLE  L"Local\\LocalTimeTzClock.Enable"
-#define EVT_DISABLE L"Local\\LocalTimeTzClock.Disable"
-#define EVT_QUERY   L"Local\\LocalTimeTzClock.Query"
-#define MAPPING     L"Local\\LocalTimeTzClock.State"
+// Names are per-process (taskbar Explorer pid) so a leftover copy of an older
+// build in the same process can never confuse the controller's view of state.
+static WCHAR g_evtEnable[96];
+static WCHAR g_evtDisable[96];
+static WCHAR g_evtQuery[96];
+static WCHAR g_mapName[96];
+
+static void BuildControlNames() {
+    DWORD pid = GetCurrentProcessId();
+    StringCchPrintfW(g_evtEnable, ARRAYSIZE(g_evtEnable),
+                     L"Local\\LocalTimeTzClock.Enable.%lu", pid);
+    StringCchPrintfW(g_evtDisable, ARRAYSIZE(g_evtDisable),
+                     L"Local\\LocalTimeTzClock.Disable.%lu", pid);
+    StringCchPrintfW(g_evtQuery, ARRAYSIZE(g_evtQuery),
+                     L"Local\\LocalTimeTzClock.Query.%lu", pid);
+    StringCchPrintfW(g_mapName, ARRAYSIZE(g_mapName),
+                     L"Local\\LocalTimeTzClock.State.%lu", pid);
+}
 
 struct SharedState {
     volatile LONG ready;       // DLL finished init
@@ -377,9 +433,9 @@ static HANDLE g_map = nullptr;
 static SharedState* g_state = nullptr;
 
 static DWORD WINAPI ControlThread(LPVOID) {
-    HANDLE enable  = CreateEventW(nullptr, FALSE, FALSE, EVT_ENABLE);
-    HANDLE disable = CreateEventW(nullptr, FALSE, FALSE, EVT_DISABLE);
-    HANDLE query   = CreateEventW(nullptr, FALSE, FALSE, EVT_QUERY);
+    HANDLE enable  = CreateEventW(nullptr, FALSE, FALSE, g_evtEnable);
+    HANDLE disable = CreateEventW(nullptr, FALSE, FALSE, g_evtDisable);
+    HANDLE query   = CreateEventW(nullptr, FALSE, FALSE, g_evtQuery);
 
     LoadConfig();
     if (g_cfg.log) {
@@ -393,13 +449,22 @@ static DWORD WINAPI ControlThread(LPVOID) {
     LogF(L"config: TimeZoneId='%s' Enabled=%d Log=%d", g_cfg.timeZoneId,
          g_cfg.enabled, g_cfg.log);
 
-    HMODULE mod = GetModuleHandleW(L"Taskbar.View.dll");
+    // Explorer starts the taskbar asynchronously, so a DLL injected right
+    // after the process appears can arrive before Taskbar.View.dll exists.
+    // Wait for it instead of going inert, but do not wait forever.
+    HMODULE mod = nullptr;
+    for (int i = 0; i < 300; ++i) {           // up to ~60 s
+        mod = GetModuleHandleW(L"Taskbar.View.dll");
+        if (mod) break;
+        Sleep(200);
+    }
     if (!mod) {
-        LogF(L"ERROR: Taskbar.View.dll not loaded in this process; staying inert");
+        LogF(L"ERROR: Taskbar.View.dll never appeared; staying inert");
         if (g_state) g_state->lastError = ERROR_MOD_NOT_FOUND;
         return 0;
     }
     g_modBase = (BYTE*)mod;
+    LogF(L"Taskbar.View.dll base=%p", mod);
 
     if (!LoadTargetZone()) {
         LogF(L"ERROR: time zone '%s' not found; staying inert", g_cfg.timeZoneId);
@@ -413,6 +478,8 @@ static DWORD WINAPI ControlThread(LPVOID) {
         g_state->supported = g_patched ? 1 : 0;
         g_state->lastError = (g_cfg.enabled && !ok) ? ERROR_PROC_NOT_FOUND : 0;
     }
+    HANDLE pt = CreateThread(nullptr, 0, PowerThread, nullptr, 0, nullptr);
+    if (pt) CloseHandle(pt);
     LogF(L"initial state: enabled=%d patched=%d", g_cfg.enabled, g_patched);
     RequestClockRefresh();
 
@@ -453,11 +520,12 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_selfModule = inst;
         DisableThreadLibraryCalls(inst);
+        BuildControlNames();
 
         // Published state so the controller can report honestly instead of
         // guessing that the injection worked.
         g_map = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr,
-                                   PAGE_READWRITE, 0, sizeof(SharedState), MAPPING);
+                                   PAGE_READWRITE, 0, sizeof(SharedState), g_mapName);
         if (g_map)
             g_state = (SharedState*)MapViewOfFile(g_map, FILE_MAP_ALL_ACCESS, 0, 0,
                                                   sizeof(SharedState));

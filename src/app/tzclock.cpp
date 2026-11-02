@@ -20,12 +20,19 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-#define EVT_ENABLE  L"Local\\LocalTimeTzClock.Enable"
-#define EVT_DISABLE L"Local\\LocalTimeTzClock.Disable"
-#define EVT_QUERY   L"Local\\LocalTimeTzClock.Query"
-#define MAPPING     L"Local\\LocalTimeTzClock.State"
+static void CtlName(wchar_t* out, size_t cch, const wchar_t* kind, DWORD pid) {
+    _snwprintf(out, cch, L"Local\\LocalTimeTzClock.%s.%lu", kind, pid);
+}
+#define EVT_ENABLE  L"Enable"
+#define EVT_DISABLE L"Disable"
+#define EVT_QUERY   L"Query"
+#define MAPPING     L"State"
 #define RUNKEY      L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 #define RUNVALUE    L"LocalTimeTzClock"
+
+#ifndef TZCLOCK_DLL_NAME
+#define TZCLOCK_DLL_NAME L"tzclock.dll"
+#endif
 
 struct SharedState {
     volatile LONG ready;
@@ -58,13 +65,15 @@ static DWORD FindTaskbarPid() {
 }
 
 static bool InjectedIn(DWORD pid) {
+    // Match the exact file name we ship, so a leftover older build in the same
+    // Explorer does not make us skip injecting the current one.
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
     if (snap == INVALID_HANDLE_VALUE) return false;
     MODULEENTRY32W me = { sizeof(me) };
     bool found = false;
     if (Module32FirstW(snap, &me)) {
         do {
-            if (_wcsicmp(me.szModule, L"tzclock.dll") == 0) { found = true; break; }
+            if (_wcsicmp(me.szModule, TZCLOCK_DLL_NAME) == 0) { found = true; break; }
         } while (Module32NextW(snap, &me));
     }
     CloseHandle(snap);
@@ -103,12 +112,16 @@ static wchar_t* DllPathNextToExe() {
     GetModuleFileNameW(nullptr, path, MAX_PATH);
     wchar_t* p = wcsrchr(path, L'\\');
     if (p) *(p + 1) = 0;
-    wcscat(path, L"tzclock.dll");
+    wcscat(path, TZCLOCK_DLL_NAME);
     return path;
 }
 
+static DWORD g_statePid = 0;
+
 static SharedState* OpenState(HANDLE* mapOut) {
-    HANDLE m = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, MAPPING);
+    wchar_t name[96];
+    CtlName(name, 96, MAPPING, g_statePid);
+    HANDLE m = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, name);
     if (!m) return nullptr;
     SharedState* s = (SharedState*)MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0,
                                                  sizeof(SharedState));
@@ -117,7 +130,9 @@ static SharedState* OpenState(HANDLE* mapOut) {
     return s;
 }
 
-static bool Signal(const wchar_t* name) {
+static bool Signal(const wchar_t* kind) {
+    wchar_t name[96];
+    CtlName(name, 96, kind, g_statePid);
     HANDLE h = OpenEventW(EVENT_MODIFY_STATE, FALSE, name);
     if (!h) return false;
     SetEvent(h);
@@ -166,17 +181,125 @@ int wmain(int argc, wchar_t** argv) {
     GetModuleFileNameW(nullptr, g_tracePath, MAX_PATH);
     wchar_t* sl = wcsrchr(g_tracePath, L'\\');
     if (sl) wcscpy(sl + 1, L"trace.log");
-    Trace(L"argc=%d", argc);
-    for (int i = 0; i < argc; ++i) Trace(L"argv[%d]=%s", i, argv[i]);
     const wchar_t* cmd = (argc > 1) ? argv[1] : L"status";
-    Trace(L"cmd=%s", cmd);
     int rc = RunCommand(cmd);
-    Trace(L"rc=%d", rc);
     return rc;
 }
 
+// One watchdog at a time. Named mutex, no polling, no registry.
+#define WATCH_MUTEX L"Local\\LocalTimeTzClock.Watchdog"
+
+static bool EnsureOnFor(DWORD pid, const wchar_t* dllPath, HANDLE* mapOut,
+                        SharedState** stateOut, bool waitForActive);
+
+// Watchdog: stays resident with a single blocking wait on the Explorer process
+// handle. No polling of windows or processes. Cost is one idle thread plus the
+// handle wait; memory is measured and reported in the delivery notes.
+static int WatchLoop() {
+    HANDLE once = CreateMutexW(nullptr, TRUE, WATCH_MUTEX);
+    if (!once) return Fail(L"cannot create watchdog mutex", GetLastError());
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        Out(L"watchdog already running\n");
+        CloseHandle(once);
+        return 0;
+    }
+
+    const wchar_t* dll = DllPathNextToExe();
+    if (GetFileAttributesW(dll) == INVALID_FILE_ATTRIBUTES)
+        return Fail(L"the clock DLL is missing next to this exe", 0);
+
+    Out(L"watchdog started (Ctrl+C to stop)\n");
+    DWORD lastPid = 0;
+    for (;;) {
+        DWORD pid = FindTaskbarPid();
+        if (!pid) { Sleep(2000); continue; }
+
+        if (pid != lastPid) {
+            // A just-started Explorer may still be loading the taskbar. Retry a
+            // few times before reporting a real failure; no busy polling.
+            bool ok = false;
+            DWORD lastErr = 0;
+            for (int attempt = 0; attempt < 30 && !ok; ++attempt) {
+                HANDLE map = nullptr;
+                SharedState* s = nullptr;
+                ok = EnsureOnFor(pid, dll, &map, &s, true);
+                if (s) { lastErr = (DWORD)s->lastError; UnmapViewOfFile(s); }
+                if (map) CloseHandle(map);
+                if (ok) break;
+                Sleep(1000);
+            }
+            if (ok) {
+                Out(L"attached to explorer pid %lu, clock active\n", pid);
+                lastPid = pid;
+            } else {
+                Out(L"explorer pid %lu not supported: %s\n", pid, ErrText(lastErr));
+                lastPid = 0;   // stay idle, try again on the next Explorer
+                Sleep(2000);
+                continue;
+            }
+        }
+
+        HANDLE proc = OpenProcess(SYNCHRONIZE, FALSE, pid);
+        if (!proc) { Sleep(1000); continue; }
+        WaitForSingleObject(proc, INFINITE);   // blocks; no polling
+        CloseHandle(proc);
+        Out(L"explorer exited, waiting for the new taskbar...\n");
+        lastPid = 0;
+        Sleep(1000);
+    }
+    return 0;
+}
+
+// Inject (if needed) and turn the clock rewrite on. Returns true when the DLL
+// is present and reports supported; the caller owns *mapOut/*stateOut.
+static bool EnsureOnFor(DWORD pid, const wchar_t* dllPath, HANDLE* mapOut,
+                        SharedState** stateOut, bool waitForActive) {
+    g_statePid = pid;   // control names are scoped to this taskbar process
+    HANDLE map = nullptr;
+    SharedState* s = OpenState(&map);
+    if (!s || !s->ready) {
+        if (s) { UnmapViewOfFile(s); CloseHandle(map); s = nullptr; map = nullptr; }
+        if (!InjectedIn(pid)) {
+            if (GetFileAttributesW(dllPath) == INVALID_FILE_ATTRIBUTES) return false;
+            if (!Inject(pid, dllPath)) return false;
+        }
+        for (int i = 0; i < 120 && !s; ++i) {
+            Sleep(50);
+            s = OpenState(&map);
+            if (s && !s->ready) { UnmapViewOfFile(s); CloseHandle(map); s = nullptr; map = nullptr; }
+        }
+        if (!s) return false;
+    }
+
+    // The DLL may still be waiting for Taskbar.View.dll to appear in a freshly
+    // started Explorer, so poll the published state for a bounded time rather
+    // than assuming an immediate result. This is the controller, not Explorer,
+    // and it stops as soon as the state settles.
+    Signal(EVT_ENABLE);
+    int spins = waitForActive ? 400 : 40;   // up to ~5s / ~2s
+    for (int i = 0; i < spins; ++i) {
+        Sleep(50);
+        Signal(EVT_QUERY);
+        Sleep(20);
+        if (s->active) break;
+        if (s->lastError) break;
+    }
+
+    *mapOut = map;
+    *stateOut = s;
+    return s->supported != 0;
+}
+
 static int RunCommand(const wchar_t* cmd) {
-    Trace(L"RunCommand enter %s", cmd);
+    if (_wcsicmp(cmd, L"watch") == 0) return WatchLoop();
+    if (_wcsicmp(cmd, L"stopwatch") == 0) {
+        HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, WATCH_MUTEX);
+        if (!h) { Out(L"no watchdog running\n"); return 0; }
+        // Nothing to signal; report so the user can close it.
+        Out(L"watchdog is running (close its console to stop it)\n");
+        CloseHandle(h);
+        return 0;
+    }
 
     if (_wcsicmp(cmd, L"uninstall") == 0) {
         HKEY k;
@@ -200,52 +323,39 @@ static int RunCommand(const wchar_t* cmd) {
         if (!pid) return Fail(L"taskbar window (Shell_TrayWnd) not found", 0);
 
         HANDLE map = nullptr;
-        SharedState* s = OpenState(&map);
-        if (!s || !s->ready) {
-            if (s) { UnmapViewOfFile(s); CloseHandle(map); s = nullptr; }
-            if (!InjectedIn(pid)) {
-                const wchar_t* dll = DllPathNextToExe();
-                if (GetFileAttributesW(dll) == INVALID_FILE_ATTRIBUTES)
-                    return Fail(L"tzclock.dll not found next to this exe", 0);
-                if (!Inject(pid, dll))
-                    return Fail(L"could not load tzclock.dll into explorer.exe", GetLastError());
-            }
-            for (int i = 0; i < 100 && !s; ++i) {
-                Sleep(50);
-                s = OpenState(&map);
-                if (s && !s->ready) { UnmapViewOfFile(s); CloseHandle(map); s = nullptr; }
-            }
-            if (!s) return Fail(L"DLL loaded but did not report ready", 0);
-        }
+        SharedState* s = nullptr;
+        if (!EnsureOnFor(pid, DllPathNextToExe(), &map, &s, false))
+            return 3;
 
-        if (wantOn) {
-            Signal(EVT_ENABLE);
-        } else if (wantOff) {
+        if (wantOff) {
             Signal(EVT_DISABLE);
-        }
-
-        for (int i = 0; i < 40; ++i) {
-            Sleep(50);
-            Signal(EVT_QUERY);
-            Sleep(20);
-            if ((wantOn && s->active) || (wantOff && !s->active)) break;
+            for (int i = 0; i < 40; ++i) {
+                Sleep(50);
+                Signal(EVT_QUERY);
+                Sleep(20);
+                if (!s->active) break;
+            }
         }
 
         PrintStatus(s);
 
-        if (wantOn && !s->supported) {
-            UnmapViewOfFile(s); CloseHandle(map);
-            fwprintf(stderr, L"NOT SUPPORTED: %s\n", ErrText(s->lastError));
+        bool supported = s->supported != 0;
+        DWORD lastErr = (DWORD)s->lastError;
+        UnmapViewOfFile(s);
+        CloseHandle(map);
+
+        if (wantOn && !supported) {
+            fwprintf(stderr, L"NOT SUPPORTED: %s\n", ErrText(lastErr));
             fwprintf(stderr, L"The clock was left showing the system time.\n");
             return 3;
         }
-        UnmapViewOfFile(s); CloseHandle(map);
+        if (wantOff) Out(L"Clock returned to the system time zone.\n");
 
         if (wantInstall) {
             wchar_t exe[MAX_PATH];
             GetModuleFileNameW(nullptr, exe, MAX_PATH);
-            wchar_t quoted[MAX_PATH + 16];
-            _snwprintf(quoted, MAX_PATH + 16, L"\"%s\" on", exe);
+            wchar_t quoted[MAX_PATH + 32];
+            _snwprintf(quoted, MAX_PATH + 32, L"\"%s\" watch", exe);
             HKEY k;
             if (RegCreateKeyExW(HKEY_CURRENT_USER, RUNKEY, 0, nullptr, 0,
                                 KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS)
@@ -253,13 +363,14 @@ static int RunCommand(const wchar_t* cmd) {
             RegSetValueExW(k, RUNVALUE, 0, REG_SZ, (const BYTE*)quoted,
                            (DWORD)((wcslen(quoted) + 1) * sizeof(wchar_t)));
             RegCloseKey(k);
-            Out(L"autostart registered (HKCU Run).\n");
+            Out(L"autostart registered (HKCU Run, runs 'watch').\n");
         }
         return 0;
     }
 
     // status
     DWORD pid = FindTaskbarPid();
+    g_statePid = pid;
     if (!pid) return Fail(L"taskbar window not found", 0);
     if (!InjectedIn(pid)) {
         Out(L"injected : no (native clock, system time zone)\n");
