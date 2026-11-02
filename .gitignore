@@ -1,3 +1,10 @@
+dist/
+build*/
+dbg/
 ref/
-build/
-*.user
+*.obj
+*.exp
+*.lib
+*.dll
+*.exe
+*.log
