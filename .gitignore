@@ -1,5 +1,7 @@
 dist/
-build*/
+build/
+build2/
+build3/
 dbg/
 ref/
 *.obj
@@ -8,3 +10,4 @@ ref/
 *.dll
 *.exe
 *.log
+*.txt
