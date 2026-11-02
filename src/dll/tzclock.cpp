@@ -28,7 +28,7 @@
 #include <stdio.h>
 #include <intrin.h>
 
-#define TZCLOCK_VERSION 12
+#define TZCLOCK_VERSION 13
 
 typedef int (WINAPI* PFN_GetTimeFormatEx)(LPCWSTR, DWORD, const SYSTEMTIME*,
                                           LPCWSTR, LPWSTR, int);
@@ -527,13 +527,13 @@ static WCHAR g_mapName[96];
 static void BuildControlNames() {
     DWORD pid = GetCurrentProcessId();
     StringCchPrintfW(g_evtEnable, ARRAYSIZE(g_evtEnable),
-                     L"Local\\LocalTimeTzClock.Enable.%lu", pid);
+                     L"Local\\LocalTimeTzClock.v%u.Enable.%lu", TZCLOCK_VERSION, pid);
     StringCchPrintfW(g_evtDisable, ARRAYSIZE(g_evtDisable),
-                     L"Local\\LocalTimeTzClock.Disable.%lu", pid);
+                     L"Local\\LocalTimeTzClock.v%u.Disable.%lu", TZCLOCK_VERSION, pid);
     StringCchPrintfW(g_evtQuery, ARRAYSIZE(g_evtQuery),
-                     L"Local\\LocalTimeTzClock.Query.%lu", pid);
+                     L"Local\\LocalTimeTzClock.v%u.Query.%lu", TZCLOCK_VERSION, pid);
     StringCchPrintfW(g_mapName, ARRAYSIZE(g_mapName),
-                     L"Local\\LocalTimeTzClock.State.%lu", pid);
+                     L"Local\\LocalTimeTzClock.v%u.State.%lu", TZCLOCK_VERSION, pid);
 }
 
 static HANDLE g_map = nullptr;

@@ -22,10 +22,10 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-#define TZCLOCK_VERSION 12
+#define TZCLOCK_VERSION 13
 
 static void CtlName(wchar_t* out, size_t cch, const wchar_t* kind, DWORD pid) {
-    _snwprintf(out, cch, L"Local\\LocalTimeTzClock.%s.%lu", kind, pid);
+    _snwprintf(out, cch, L"Local\\LocalTimeTzClock.v%u.%s.%lu", TZCLOCK_VERSION, kind, pid);
 }
 #define EVT_ENABLE     L"Enable"
 #define EVT_DISABLE    L"Disable"
@@ -37,7 +37,7 @@ static void CtlName(wchar_t* out, size_t cch, const wchar_t* kind, DWORD pid) {
 #define WATCH_MUTEX    L"Local\\LocalTimeTzClock.Watchdog"
 
 #ifndef TZCLOCK_DLL_NAME
-#define TZCLOCK_DLL_NAME L"tzclock_v12.dll"
+#define TZCLOCK_DLL_NAME L"tzclock_v13.dll"
 #endif
 
 struct SharedState {
