@@ -69,10 +69,10 @@ build.bat dist
 | 文件 | 大小 | 说明 |
 |---|---|---|
 | `tzclock.exe` | 147 KB | 控制器（一次性运行，不常驻） |
-| `tzclock_v11.dll` | 144 KB | 注入 Explorer 的钩子模块 |
+| `tzclock_v11.dll` | 145 KB | 注入 Explorer 的钩子模块 |
 | `tzclock.ini` | 383 B | 配置 |
 
-发布包（3 个必需文件）合计约 **291 KB**。
+发布包（3 个必需文件）合计 **299391 字节 ≈ 292.4 KB**。
 
 > 源码里 DLL 文件名带版本号（`tzclock_vN.dll`）。原因：已加载进 Explorer 的 DLL
 > 无法覆盖，换名字才能在不重启你资源管理器的情况下重建。改 DLL 时请同步递增
@@ -170,7 +170,7 @@ US DST 结束 2026-11-01 09:01Z          ->  01:01              （回拨正确�
 
 | 项目 | 实测值 | 测量方法 |
 |---|---|---|
-| 发布包 | 291 KB（3 文件） | `ls -l dist/` |
+| 发布包 | 299391 字节 ≈ 292.4 KB（3 文件） | 逐文件字节数求和 |
 | 常驻进程 | `tzclock.exe watch` 1 个（仅守护模式） | `Get-Process` |
 | 守护进程内存 | 工作集 9.09 MB / 私有 0.89 MB，1 线程 | `WorkingSet64`, `PrivateMemorySize64` |
 | **Explorer 内新增** | **172.0 KB** 镜像，43 页，全部驻留 | `wsmeasure.exe`：`QueryWorkingSetEx` 逐页查 Valid 位 |
