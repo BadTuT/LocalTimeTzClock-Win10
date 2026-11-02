@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-#define TZCLOCK_VERSION 13
+#define TZCLOCK_VERSION 14
 
 static void CtlName(wchar_t* out, size_t cch, const wchar_t* kind, DWORD pid) {
     _snwprintf(out, cch, L"Local\\LocalTimeTzClock.v%u.%s.%lu", TZCLOCK_VERSION, kind, pid);
@@ -37,7 +37,7 @@ static void CtlName(wchar_t* out, size_t cch, const wchar_t* kind, DWORD pid) {
 #define WATCH_MUTEX    L"Local\\LocalTimeTzClock.Watchdog"
 
 #ifndef TZCLOCK_DLL_NAME
-#define TZCLOCK_DLL_NAME L"tzclock_v13.dll"
+#define TZCLOCK_DLL_NAME L"tzclock_v14.dll"
 #endif
 
 struct SharedState {
@@ -183,8 +183,8 @@ static bool Signal(const wchar_t* kind) {
 static const wchar_t* ErrText(DWORD e) {
     switch (e) {
         case 0: return L"none";
-        case ERROR_MOD_NOT_FOUND: return L"Taskbar.View.dll not loaded";
-        case ERROR_PROC_NOT_FOUND: return L"unexpected function layout in Taskbar.View.dll";
+        case ERROR_MOD_NOT_FOUND: return L"taskbar clock module not loaded";
+        case ERROR_PROC_NOT_FOUND: return L"unexpected import layout in the taskbar clock module";
         case ERROR_INVALID_PARAMETER: return L"TimeZoneId in tzclock.ini is not a valid Windows time zone";
         default: return L"see tzclock.log";
     }

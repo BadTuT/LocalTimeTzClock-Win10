@@ -1,19 +1,22 @@
 // LocalTimeTzClock - native taskbar clock, target time zone, system TZ untouched.
 //
 // HOW IT WORKS (see docs/analysis.md for the measured evidence):
-//   The native taskbar clock text is produced inside Taskbar.View.dll by
-//   exactly one formatting function (RVA 0x34BA4 on 623.27903.70.0) plus one
-//   time-formatting helper it calls (RVA 0x35960). Those two functions are the
-//   only code in the whole module that reference GetTimeFormatEx /
-//   GetDateFormatEx. This DLL rewrites the *import table slots* of
-//   Taskbar.View.dll for those two APIs and, inside the hooks, replaces the
-//   SYSTEMTIME argument with "now, converted to the configured Windows named
-//   time zone" - but only when the return address is one of the three known
-//   clock call sites. Every other caller of those APIs (and every other module
-//   in Explorer, including file timestamps) is passed through untouched.
+//   The taskbar clock text is produced by whichever module hosts the tray on
+//   the running build - Taskbar.View.dll up to ~24H2, SystemTray.dll on the
+//   rewritten (25H2/26H1+) taskbar. That module imports GetTimeFormatEx /
+//   GetDateFormatEx and calls them from a handful of display-only sites
+//   (clock text, tray tooltips, accessibility names); the exact count differs
+//   per build, so it is discovered at runtime instead of being hardcoded.
 //
-//   No global/kernelbase hook is installed. Nothing outside the taskbar clock
-//   formatting path is affected.
+//   This DLL rewrites the *import table slots* of that one module for those
+//   two APIs. Inside the hooks the SYSTEMTIME argument is replaced with "now,
+//   converted to the configured Windows named time zone". Only call sites
+//   inside the host module are rewritten - every other module in Explorer
+//   (file timestamps, other shell components) is passed through untouched,
+//   because the patch is scoped to a single module's IAT.
+//
+//   No global/kernelbase hook is installed. GetLocalTime is deliberately not
+//   hooked: a WM_TIMECHANGE broadcast is enough to make the clock repaint.
 
 #define WIN32_LEAN_AND_MEAN
 #define _CRT_SECURE_NO_WARNINGS
@@ -28,7 +31,22 @@
 #include <stdio.h>
 #include <intrin.h>
 
-#define TZCLOCK_VERSION 13
+// MinGW/GCC has no MSVC _ReturnAddress() intrinsic; map it to the builtin so
+// the same source builds under both toolchains.
+#if defined(__GNUC__)
+#undef _ReturnAddress
+#define _ReturnAddress() __builtin_return_address(0)
+#endif
+
+#define TZCLOCK_VERSION 14
+
+// The taskbar clock lives in different modules depending on the Windows build:
+//   * <= 23H2/24H2 : Taskbar.View.dll (XAML taskbar, clock text via Win32 APIs)
+//   * >= 25H2/26H1 : SystemTray.dll  (rewritten tray experience)
+// Probe in priority order; the first module that exposes the formatting
+// imports wins.
+static const WCHAR* kTargetModules[] = { L"SystemTray.dll", L"Taskbar.View.dll" };
+#define TARGET_MODULE_COUNT (int)(sizeof(kTargetModules) / sizeof(kTargetModules[0]))
 
 typedef int (WINAPI* PFN_GetTimeFormatEx)(LPCWSTR, DWORD, const SYSTEMTIME*,
                                           LPCWSTR, LPWSTR, int);
@@ -186,8 +204,14 @@ static PFN_GetDateFormatEx g_origDateFmt = nullptr;
 static PFN_GetLocalTime   g_origLocalTime = nullptr;
 
 static BYTE* g_modBase = nullptr;
-static DWORD g_callSiteTime = 0;
-static DWORD g_callSiteDate[2] = { 0, 0 };
+// Modern builds call the formatting APIs from several distinct functions
+// (clock text, tray tooltips, accessibility strings, flyout labels). We do not
+// hardcode a per-build RVA list any more: every formatting call inside the
+// taskbar module is display-only text, so all of them are rewritten.
+#define MAX_SITES 16
+static DWORD g_callSiteTime[MAX_SITES] = { 0 };
+static int   g_callSiteTimeCount = 0;
+static DWORD g_callSiteDate[MAX_SITES] = { 0 };
 static int   g_callSiteDateCount = 0;
 
 static SRWLOCK g_zoneLock = SRWLOCK_INIT;
@@ -243,7 +267,8 @@ static BOOL TargetNow(SYSTEMTIME* out) {
 
 static BOOL IsClockCallSite(void* retAddr) {
     DWORD rva = (DWORD)((BYTE*)retAddr - g_modBase);
-    if (g_callSiteTime && rva == g_callSiteTime) return TRUE;
+    for (int i = 0; i < g_callSiteTimeCount; ++i)
+        if (rva == g_callSiteTime[i]) return TRUE;
     for (int i = 0; i < g_callSiteDateCount; ++i)
         if (rva == g_callSiteDate[i]) return TRUE;
     return FALSE;
@@ -302,6 +327,10 @@ static IatEntry g_iatTime = { nullptr, nullptr };
 static IatEntry g_iatDate = { nullptr, nullptr };
 static IatEntry g_iatLocal = { nullptr, nullptr };
 
+// Patch the IAT slot for funcName. When moduleName is null the first import
+// descriptor exposing that name wins - newer builds import the date/time
+// helpers straight from KERNEL32.dll instead of the api-ms-win-* apisets, so
+// matching on the DLL name is no longer portable.
 static int PatchImport(const char* moduleName, const char* funcName,
                        void* replacement, IatEntry* found) {
     BYTE* base = g_modBase;
@@ -313,7 +342,7 @@ static int PatchImport(const char* moduleName, const char* funcName,
 
     for (; imp->Name; ++imp) {
         const char* dll = (const char*)(base + imp->Name);
-        if (_stricmp(dll, moduleName) != 0) continue;
+        if (moduleName && _stricmp(dll, moduleName) != 0) continue;
 
         auto oft = (IMAGE_THUNK_DATA*)(base + imp->OriginalFirstThunk);
         auto ft = (IMAGE_THUNK_DATA*)(base + imp->FirstThunk);
@@ -461,49 +490,37 @@ static BOOL g_patched = FALSE;
 
 static BOOL ActivateHooks() {
     if (!g_patched) {
-        int a = PatchImport("api-ms-win-core-datetime-l1-1-1.dll",
-                            "GetTimeFormatEx", (void*)HookGetTimeFormatEx, &g_iatTime);
-        int b = PatchImport("api-ms-win-core-datetime-l1-1-1.dll",
-                            "GetDateFormatEx", (void*)HookGetDateFormatEx, &g_iatDate);
-        int c = PatchImport("api-ms-win-core-sysinfo-l1-1-0.dll",
-                            "GetLocalTime", (void*)HookGetLocalTime, &g_iatLocal);
-        if (a != 1 || b != 1 || c != 1) {
-            LogF(L"ERROR: IAT patch failed (time=%d date=%d local=%d)", a, b, c);
+        int a = PatchImport(nullptr, "GetTimeFormatEx", (void*)HookGetTimeFormatEx, &g_iatTime);
+        int b = PatchImport(nullptr, "GetDateFormatEx", (void*)HookGetDateFormatEx, &g_iatDate);
+        if (a != 1 || b != 1) {
+            LogF(L"ERROR: IAT patch failed (time=%d date=%d)", a, b);
             if (a == 1) WriteSlotInternal(g_iatTime.slot, g_iatTime.original);
             if (b == 1) WriteSlotInternal(g_iatDate.slot, g_iatDate.original);
-            if (c == 1) WriteSlotInternal(g_iatLocal.slot, g_iatLocal.original);
             return FALSE;
         }
         g_origTimeFmt = (PFN_GetTimeFormatEx)g_iatTime.original;
         g_origDateFmt = (PFN_GetDateFormatEx)g_iatDate.original;
-        g_origLocalTime = (PFN_GetLocalTime)g_iatLocal.original;
         g_patched = TRUE;
-        LogF(L"IAT patched: time=%p date=%p local=%p", g_iatTime.slot, g_iatDate.slot, g_iatLocal.slot);
+        LogF(L"IAT patched: time=%p date=%p", g_iatTime.slot, g_iatDate.slot);
 
         DWORD timeSlotRva = (DWORD)((BYTE*)g_iatTime.slot - g_modBase);
         DWORD dateSlotRva = (DWORD)((BYTE*)g_iatDate.slot - g_modBase);
-        DWORD localSlotRva = (DWORD)((BYTE*)g_iatLocal.slot - g_modBase);
 
-        DWORD fits[8] = { 0 }, fds[8] = { 0 }, lcs[8] = { 0 };
+        DWORD fits[MAX_SITES] = { 0 }, fds[MAX_SITES] = { 0 }, lcs[8] = { 0 };
         int nt = 0, nd = 0, nl = 0;
-        ScanCallSitesSinglePass(timeSlotRva, dateSlotRva, localSlotRva,
-                                fits, &nt, 8, fds, &nd, 8, lcs, &nl, 8);
+        ScanCallSitesSinglePass(timeSlotRva, dateSlotRva, 0,
+                                fits, &nt, MAX_SITES, fds, &nd, MAX_SITES, lcs, &nl, 8);
         LogF(L"call sites found: time=%d date=%d local=%d", nt, nd, nl);
 
-        g_callSiteLocalCount = nl > 8 ? 8 : nl;
-        memcpy(g_callSiteLocal, lcs, sizeof(DWORD) * g_callSiteLocalCount);
+        g_callSiteTimeCount = nt > MAX_SITES ? MAX_SITES : nt;
+        memcpy(g_callSiteTime, fits, sizeof(DWORD) * g_callSiteTimeCount);
+        g_callSiteDateCount = nd > MAX_SITES ? MAX_SITES : nd;
+        memcpy(g_callSiteDate, fds, sizeof(DWORD) * g_callSiteDateCount);
 
-        if (nt == 1 && nd >= 1) {
-            g_callSiteTime = fits[0];
-            memcpy(g_callSiteDate, fds, sizeof(DWORD) * (nd > 2 ? 2 : nd));
-            g_callSiteDateCount = (nd > 2 ? 2 : nd);
-            LogF(L"call sites: time=%08X date0=%08X date1=%08X", g_callSiteTime,
-                 g_callSiteDate[0], g_callSiteDateCount > 1 ? g_callSiteDate[1] : 0);
-        } else {
+        if (g_callSiteTimeCount == 0 || g_callSiteDateCount == 0) {
             LogF(L"ERROR: unexpected call-site layout (%d/%d), staying inert", nt, nd);
             WriteSlotInternal(g_iatTime.slot, g_iatTime.original);
             WriteSlotInternal(g_iatDate.slot, g_iatDate.original);
-            WriteSlotInternal(g_iatLocal.slot, g_iatLocal.original);
             g_patched = FALSE;
             return FALSE;
         }
@@ -556,20 +573,25 @@ static DWORD WINAPI ControlThread(LPVOID) {
          g_cfg.enabled, g_cfg.log);
 
     // Explorer starts the taskbar asynchronously, so a DLL injected right
-    // after the process appears can arrive before Taskbar.View.dll exists.
+    // after the process appears can arrive before the host module exists.
+    // Try every known clock host in priority order.
     HMODULE mod = nullptr;
+    const WCHAR* modName = nullptr;
     for (int i = 0; i < 300; ++i) {           // up to ~60 s
-        mod = GetModuleHandleW(L"Taskbar.View.dll");
+        for (int m = 0; m < TARGET_MODULE_COUNT; ++m) {
+            mod = GetModuleHandleW(kTargetModules[m]);
+            if (mod) { modName = kTargetModules[m]; break; }
+        }
         if (mod) break;
         Sleep(200);
     }
     if (!mod) {
-        LogF(L"ERROR: Taskbar.View.dll never appeared; staying inert");
+        LogF(L"ERROR: no taskbar clock module appeared; staying inert");
         if (g_state) g_state->lastError = ERROR_MOD_NOT_FOUND;
         return 0;
     }
     g_modBase = (BYTE*)mod;
-    LogF(L"Taskbar.View.dll base=%p", mod);
+    LogF(L"host module '%s' base=%p", modName, mod);
 
     if (!LoadTargetZone()) {
         LogF(L"ERROR: time zone '%s' not found; staying inert", g_cfg.timeZoneId);
