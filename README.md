@@ -6,10 +6,10 @@
 
 *Display any custom time zone directly in the native Windows 11 taskbar clock — without altering the system time zone, UTC clock, or file timestamps.*
 
-[![Platform](https://img.shields.io/badge/Platform-Windows%2011%20x64-blue?logo=windows)](https://github.com/)
-[![Language](https://img.shields.io/badge/Language-C%20%2F%20C%2B%2B%20%28Win32%29-00599C?logo=c%2B%2B)](https://github.com/)
-[![Release Size](https://img.shields.io/badge/Release%20Size-38.2%20KB-success)](https://github.com/)
-[![Explorer Overhead](https://img.shields.io/badge/Explorer%20Memory-36.0%20KB-brightgreen)](https://github.com/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2011%20x64-blue?logo=windows)](https://github.com/ana52070/LocalTimeTzClock)
+[![Language](https://img.shields.io/badge/Language-C%20%2F%20C%2B%2B%20%28Win32%29-00599C?logo=c%2B%2B)](https://github.com/ana52070/LocalTimeTzClock)
+[![Release Size](https://img.shields.io/badge/Release%20Size-38.2%20KB-success)](https://github.com/ana52070/LocalTimeTzClock)
+[![Explorer Overhead](https://img.shields.io/badge/Explorer%20Memory-36.0%20KB-brightgreen)](https://github.com/ana52070/LocalTimeTzClock)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 [功能特性](#-功能特性) • [技术原理](#-技术原理与实现路径) • [快速开始](#-快速开始与用法) • [实测性能指标](#-实测性能与资源开销) • [English Summary](#-english-summary)
