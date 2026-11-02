@@ -10,9 +10,10 @@
 [![Language](https://img.shields.io/badge/Language-C%20%2F%20C%2B%2B%20%28Win32%29-00599C?logo=c%2B%2B)](https://github.com/ana52070/LocalTimeTzClock)
 [![Release Size](https://img.shields.io/badge/Release%20Size-38.2%20KB-success)](https://github.com/ana52070/LocalTimeTzClock)
 [![Explorer Overhead](https://img.shields.io/badge/Explorer%20Memory-36.0%20KB-brightgreen)](https://github.com/ana52070/LocalTimeTzClock)
+[![Community](https://img.shields.io/badge/Community-LINUX%20DO-orange?logo=linux)](https://linux.do/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-[功能特性](#-功能特性) • [技术原理](#-技术原理与实现路径) • [快速开始](#-快速开始与用法) • [实测性能指标](#-实测性能与资源开销) • [English Summary](#-english-summary)
+[功能特性](#-功能特性) • [技术原理](#-技术原理与实现路径) • [快速开始](#-快速开始与用法) • [实测性能指标](#-实测性能与资源开销) • [致谢](#-致谢-acknowledgements) • [English Summary](#-english-summary)
 
 </div>
 
@@ -20,13 +21,14 @@
 
 ## 🌟 核心理念与痛点解决
 
-很多跨国办公、出海业务或留学生用户需要任务栏时钟显示特定时区（如北京时间、美东时间、UTC），但直接修改 Windows 系统时区会导致：
+很多跨国办公、出海业务、留学生以及**玩 Claude / AI 怕封号需要改系统时区**的用户，经常需要任务栏时钟与真实生活作息同步，但直接修改 Windows 系统时区会导致：
 1. **严重的附带影响**：浏览器日历、工作软件聊天记录、Git 提交时间戳、IDE 构建日志全部被强行带偏；
-2. **已有工具体验糟糕**：市面上的替代方案要么是在右下角浮动一个“假时钟”窗口覆盖原生控件，导致深色/浅色主题脱节、DPI 缩放模糊、失去原生平滑动画，点击时无法唤出原生通知与日历面板；要么是安装体积庞大（数百兆）的复杂套件。
+2. **过检测后的看表痛点**：为了防封把 Windows 系统时区改成了美西（如 `America/Tijuana` 或 `Pacific Standard Time`），通过了 IP/环境防伪装检测（如 `ip.net.coffee/claude`），但看一眼电脑右下角任务栏直接迷茫，根本不知道国内到底几点了！
+3. **已有工具体验糟糕**：市面上的替代方案要么是在右下角浮动一个“假时钟”窗口覆盖原生控件，导致深色/浅色主题脱节、DPI 缩放模糊、失去原生平滑动画，点击时无法唤出原生通知与日历面板；要么是安装体积庞大（数百兆）的复杂套件。
 
 **LocalTimeTzClock** 是一个极简、原生、轻量的 Win32 原生小工具：
 - **真正的原生时钟**：直接改写 `Taskbar.View.dll` 的时钟格式化数据源，**不是**浮窗，**不是**覆盖层，**不是**重制控件；
-- **零全局污染**：Windows 系统时区保持原样，文件修改时间、其他应用程序读取系统时间 100% 保持原生；
+- **零全局污染**：Windows 系统时区保持原样（系统底层依旧是美西时区，完美过各种风控环境检测），文件修改时间、其他应用程序读取系统时间 100% 保持原生；
 - **完整保留原生体验**：点击打开日历/通知中心、悬停提示、多显示器副任务栏、DPI 缩放、深浅主题切换全部完美保留；
 - **极致轻量**：发布包仅 **38 KB**，在 Explorer 内部常驻内存仅 **36 KB**，空闲 CPU 恒定 **0.00%**。
 
@@ -66,7 +68,7 @@ Hook 函数内部引入了调用点返回地址二次白名单：
 ## 🚀 快速开始与用法
 
 ### 1. 下载与解压
-从 [Releases](../../releases) 下载便携发布包（包含 `tzclock.exe`、`tzclock_v13.dll`、`tzclock.ini`）。
+从 [Releases](https://github.com/ana52070/LocalTimeTzClock/releases) 下载便携发布包（包含 `tzclock.exe`、`tzclock_v13.dll`、`tzclock.ini`）。
 
 ### 2. 配置时区 (`tzclock.ini`)
 与 `tzclock.exe` 放置在同一目录下编辑：
@@ -128,10 +130,17 @@ build.bat dist
 
 ---
 
+## 💖 致谢 (Acknowledgements)
+
+特别鸣谢 **[LINUX DO](https://linux.do/)** 社区及其热心佬友们的支持与启发！  
+*Special thanks to the **[LINUX DO](https://linux.do/)** community for inspiration and support!*
+
+---
+
 ## 🌐 English Summary
 
 ### Overview
-**LocalTimeTzClock** is an ultra-lightweight, purely native Win32 utility that enables Windows 11 taskbar clock to display any target time zone (e.g., UTC, Beijing, Tokyo) while keeping the global Windows system time zone and file timestamps completely untouched.
+**LocalTimeTzClock** is an ultra-lightweight, purely native Win32 utility that enables Windows 11 taskbar clock to display any target time zone (e.g., UTC, Beijing, Tokyo) while keeping the global Windows system time zone and file timestamps completely untouched. Perfect for bypass scenarios (like anti-fraud or Claude AI environment consistency) where the system timezone is set abroad, but you still want your native taskbar clock to display local time.
 
 ### Why It's Better
 - **True Native Clock**: No fake overlay windows, no intrusive Electron frameworks, no replacement widgets. The native taskbar clock UI, Fluent design, DPI scaling, and calendar flyout remain 100% functional.
