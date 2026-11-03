@@ -12,3 +12,4 @@ ref/
 *.log
 *.txt
 __pycache__/
+artifacts/

@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-#define TZCLOCK_VERSION 14
+#define TZCLOCK_VERSION 16
 
 static void CtlName(wchar_t* out, size_t cch, const wchar_t* kind, DWORD pid) {
     _snwprintf(out, cch, L"Local\\LocalTimeTzClock.v%u.%s.%lu", TZCLOCK_VERSION, kind, pid);
@@ -37,7 +37,7 @@ static void CtlName(wchar_t* out, size_t cch, const wchar_t* kind, DWORD pid) {
 #define WATCH_MUTEX    L"Local\\LocalTimeTzClock.Watchdog"
 
 #ifndef TZCLOCK_DLL_NAME
-#define TZCLOCK_DLL_NAME L"tzclock_v14.dll"
+#define TZCLOCK_DLL_NAME L"tzclock_v16.dll"
 #endif
 
 struct SharedState {
@@ -184,7 +184,10 @@ static const wchar_t* ErrText(DWORD e) {
     switch (e) {
         case 0: return L"none";
         case ERROR_MOD_NOT_FOUND: return L"taskbar clock module not loaded";
-        case ERROR_PROC_NOT_FOUND: return L"unexpected import layout in the taskbar clock module";
+        case ERROR_PROC_NOT_FOUND: return L"unsupported or unverified taskbar clock module layout";
+        case ERROR_WRITE_FAULT: return L"IAT rollback or page protection restore failed; restart Explorer before retrying";
+        case ERROR_ACCESS_DENIED: return L"cannot update the taskbar clock import table";
+        case ERROR_BUSY: return L"the taskbar clock import table was changed by another hook";
         case ERROR_INVALID_PARAMETER: return L"TimeZoneId in tzclock.ini is not a valid Windows time zone";
         default: return L"see tzclock.log";
     }
@@ -195,7 +198,7 @@ static void PrintStatus(SharedState* s) {
     Out(L"version  : v%lu\n", s->dllVersion);
     Out(L"supported: %s\n", s->supported ? L"yes" : L"NO");
     Out(L"active   : %s\n", s->active ? L"yes" : L"no");
-    Out(L"rewrites : %ld clock formatting calls\n", s->hits);
+    Out(L"rewrites : %ld clock calls rewritten\n", s->hits);
     if (s->lastError) Out(L"lastError: %s\n", ErrText(s->lastError));
 }
 
@@ -365,8 +368,19 @@ static int RunCommand(int argc, wchar_t** argv) {
 
         HANDLE map = nullptr;
         SharedState* s = nullptr;
-        if (!EnsureOnFor(pid, DllPathNextToExe(), &map, &s, false))
+        if (!EnsureOnFor(pid, DllPathNextToExe(), &map, &s, false)) {
+            // 失败也打印状态并释放映射，避免只返回退出码 3 而没有诊断信息。
+            if (s) {
+                PrintStatus(s);
+                fwprintf(stderr, L"Clock not activated: %s\n", s->lastError ?
+                         ErrText((DWORD)s->lastError) : L"initialization pending; run status again");
+                UnmapViewOfFile(s);
+            } else {
+                fwprintf(stderr, L"Cannot initialize or read the clock DLL state.\n");
+            }
+            if (map) CloseHandle(map);
             return 3;
+        }
 
         if (wantOff) {
             Signal(EVT_DISABLE);

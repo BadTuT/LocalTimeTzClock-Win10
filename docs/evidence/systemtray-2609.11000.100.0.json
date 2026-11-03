@@ -1,0 +1,205 @@
+{
+  "module": "SystemTray.dll",
+  "file_version": "2609.11000.100.0",
+  "builds_from_index": [
+    "26300.9807",
+    "26300.9818"
+  ],
+  "source_index": "https://m417z.com/winbindex-data-insider/by_filename_compressed/94/systemtray.dll.json.gz",
+  "binary_url": "https://msdl.microsoft.com/download/symbols/SystemTray.dll/6AA9E607202000/SystemTray.dll",
+  "file_size": 2080256,
+  "sha256": "9772d19ec44f22ab2fcb976941d6ba6d1e66aabfb9d66367723bb9154ce7769f",
+  "pe": {
+    "machine": 34404,
+    "timestamp": 1789519367,
+    "size_of_image": 2105344
+  },
+  "pdb": {
+    "name": "SystemTray.pdb",
+    "guid": "B3CC4C19DFDC4131BBF8F213369DA32F",
+    "age": 1,
+    "symbol_url": "https://msdl.microsoft.com/download/symbols/SystemTray.pdb/B3CC4C19DFDC4131BBF8F213369DA32F1/SystemTray.pdb"
+  },
+  "pdb_identity_verified": true,
+  "imports": [
+    {
+      "module": "KERNEL32.dll",
+      "function": "GetLocalTime",
+      "iat_rva": 1618544
+    },
+    {
+      "module": "KERNEL32.dll",
+      "function": "GetDateFormatEx",
+      "iat_rva": 1618552
+    },
+    {
+      "module": "KERNEL32.dll",
+      "function": "GetTimeFormatEx",
+      "iat_rva": 1618568
+    },
+    {
+      "module": "KERNEL32.dll",
+      "function": "SystemTimeToTzSpecificLocalTimeEx",
+      "iat_rva": 1618576
+    },
+    {
+      "module": "KERNEL32.dll",
+      "function": "GetSystemTime",
+      "iat_rva": 1618616
+    },
+    {
+      "module": "KERNEL32.dll",
+      "function": "GetSystemTimeAsFileTime",
+      "iat_rva": 1618744
+    }
+  ],
+  "call_sites": {
+    "GetTimeFormatEx": [
+      {
+        "call_rva": 819530,
+        "return_rva": 819536,
+        "function_begin_rva": 819364,
+        "function_end_rva": 820040
+      },
+      {
+        "call_rva": 820717,
+        "return_rva": 820723,
+        "function_begin_rva": 820536,
+        "function_end_rva": 821237
+      },
+      {
+        "call_rva": 821877,
+        "return_rva": 821883,
+        "function_begin_rva": 821712,
+        "function_end_rva": 822509
+      },
+      {
+        "call_rva": 821898,
+        "return_rva": 821904,
+        "function_begin_rva": 821712,
+        "function_end_rva": 822509
+      },
+      {
+        "call_rva": 1219733,
+        "return_rva": 1219739,
+        "function_begin_rva": 1219552,
+        "function_end_rva": 1220253
+      },
+      {
+        "call_rva": 1220425,
+        "return_rva": 1220431,
+        "function_begin_rva": 1220260,
+        "function_end_rva": 1221057
+      },
+      {
+        "call_rva": 1220446,
+        "return_rva": 1220452,
+        "function_begin_rva": 1220260,
+        "function_end_rva": 1221057
+      }
+    ],
+    "GetDateFormatEx": [
+      {
+        "call_rva": 836595,
+        "return_rva": 836601,
+        "function_begin_rva": 836448,
+        "function_end_rva": 838389
+      },
+      {
+        "call_rva": 837048,
+        "return_rva": 837054,
+        "function_begin_rva": 836448,
+        "function_end_rva": 838389
+      },
+      {
+        "call_rva": 837105,
+        "return_rva": 837111,
+        "function_begin_rva": 836448,
+        "function_end_rva": 838389
+      },
+      {
+        "call_rva": 838080,
+        "return_rva": 838086,
+        "function_begin_rva": 836448,
+        "function_end_rva": 838389
+      },
+      {
+        "call_rva": 1231608,
+        "return_rva": 1231614,
+        "function_begin_rva": 1231472,
+        "function_end_rva": 1232841
+      },
+      {
+        "call_rva": 1232051,
+        "return_rva": 1232057,
+        "function_begin_rva": 1231472,
+        "function_end_rva": 1232841
+      },
+      {
+        "call_rva": 1232105,
+        "return_rva": 1232111,
+        "function_begin_rva": 1231472,
+        "function_end_rva": 1232841
+      }
+    ],
+    "GetLocalTime": [
+      {
+        "call_rva": 828343,
+        "return_rva": 828349,
+        "function_begin_rva": 828276,
+        "function_end_rva": 829678
+      },
+      {
+        "call_rva": 830071,
+        "return_rva": 830077,
+        "function_begin_rva": 830012,
+        "function_end_rva": 830449
+      },
+      {
+        "call_rva": 1226551,
+        "return_rva": 1226557,
+        "function_begin_rva": 1226484,
+        "function_end_rva": 1227823
+      },
+      {
+        "call_rva": 1228007,
+        "return_rva": 1228013,
+        "function_begin_rva": 1227948,
+        "function_end_rva": 1228385
+      }
+    ]
+  },
+  "public_symbols": {
+    "00129BE0": "private: struct winrt::hstring __cdecl winrt::SystemTray::implementation::ClockSystemTrayIconDataModel::GetShortenedTimeString(struct _SYSTEMTIME const &,class SystemTrayTelemetry::ClockUpdate &)",
+    "000CAA3C": "private: void __cdecl winrt::SystemTray::implementation::ClockSystemTrayIconDataModel2::ScheduleNextUpdate(class SystemTrayTelemetry::ClockUpdate &)",
+    "0012B6F4": "private: void __cdecl winrt::SystemTray::implementation::ClockSystemTrayIconDataModel::RefreshIcon(class SystemTrayTelemetry::ClockUpdate &)",
+    "0012BCAC": "private: void __cdecl winrt::SystemTray::implementation::ClockSystemTrayIconDataModel::ScheduleNextUpdate(class SystemTrayTelemetry::ClockUpdate &)",
+    "000C80A4": "private: struct winrt::hstring __cdecl winrt::SystemTray::implementation::ClockSystemTrayIconDataModel2::GetCompactTimeString(struct _SYSTEMTIME const &,class SystemTrayTelemetry::ClockUpdate &)",
+    "00129EA4": "private: struct winrt::hstring __cdecl winrt::SystemTray::implementation::ClockSystemTrayIconDataModel::GetTimeString(struct _SYSTEMTIME const &,class SystemTrayTelemetry::ClockUpdate &)",
+    "0012CA70": "private: void __cdecl winrt::SystemTray::implementation::ClockSystemTrayIconDataModel::UpdateDateString(struct _SYSTEMTIME const &,class SystemTrayTelemetry::ClockUpdate &)",
+    "000C8538": "private: struct winrt::hstring __cdecl winrt::SystemTray::implementation::ClockSystemTrayIconDataModel2::GetShortenedTimeString(struct _SYSTEMTIME const &,class SystemTrayTelemetry::ClockUpdate &)",
+    "000CC360": "private: void __cdecl winrt::SystemTray::implementation::ClockSystemTrayIconDataModel2::UpdateDateString(struct _SYSTEMTIME const &,class SystemTrayTelemetry::ClockUpdate &)",
+    "000C89D0": "private: struct winrt::hstring __cdecl winrt::SystemTray::implementation::ClockSystemTrayIconDataModel2::GetTimeString(struct _SYSTEMTIME const &,class SystemTrayTelemetry::ClockUpdate &)",
+    "000CA374": "private: void __cdecl winrt::SystemTray::implementation::ClockSystemTrayIconDataModel2::RefreshIcon(class SystemTrayTelemetry::ClockUpdate &)"
+  },
+  "policy": {
+    "strategy": "local_time_source",
+    "display_source_returns": [
+      828349,
+      1226557
+    ],
+    "scheduler_kick_returns": [
+      830077,
+      1228013
+    ],
+    "rewrite_time_format_iat": false,
+    "rewrite_date_format_iat": false
+  },
+  "validation": {
+    "binary_and_symbols": "verified",
+    "static_data_flow": "reviewed",
+    "isolated_hook_tests": "passed: 15 core, 1 controller, 1 coherent snapshot",
+    "build_26300_desktop": "not_run"
+  },
+  "pr_reported_other_version": "2609.12001.100.0 is not covered by this identity"
+}

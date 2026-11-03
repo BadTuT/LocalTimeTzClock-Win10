@@ -27,7 +27,7 @@
 3. **已有工具体验糟糕**：市面上的替代方案要么是在右下角浮动一个“假时钟”窗口覆盖原生控件，导致深色/浅色主题脱节、DPI 缩放模糊、失去原生平滑动画，点击时无法唤出原生通知与日历面板；要么是安装体积庞大（数百兆）的复杂套件。
 
 **LocalTimeTzClock** 是一个极简、原生、轻量的 Win32 原生小工具：
-- **真正的原生时钟**：直接改写 `Taskbar.View.dll` 的时钟格式化数据源，**不是**浮窗，**不是**覆盖层，**不是**重制控件；
+- **真正的原生时钟**：直接改写任务栏时钟模块数据源，**不是**浮窗，**不是**覆盖层，**不是**重制控件；
 - **零全局污染**：Windows 系统时区保持原样（系统底层依旧是美西时区，完美过各种风控环境检测），文件修改时间、其他应用程序读取系统时间 100% 保持原生；
 - **完整保留原生体验**：点击打开日历/通知中心、悬停提示、多显示器副任务栏、DPI 缩放、深浅主题切换全部完美保留；
 - **极致轻量**：发布包仅 **38 KB**，在 Explorer 内部常驻内存仅 **36 KB**，空闲 CPU 恒定 **0.00%**。
@@ -36,23 +36,39 @@
 
 ## 🔍 技术原理与实现路径
 
-通过对 Windows 11 XAML 任务栏模块做全量逆向指令扫描分析，精确确定挂钩路径：
+通过真实模块的导入与调用点扫描、匹配微软符号及关键数据流反汇编，限定挂钩路径：
 
-### 1. 目标模块与 IAT 定向劫持
-Windows 11 23H2 的 XAML 任务栏时钟渲染于：
-`C:\Windows\SystemApps\MicrosoftWindows.Client.Core_cw5n1h2txyewy\Taskbar.View.dll`
+### 1. 目标模块探测与双候选架构
+为了支持不同 Windows 11 版本的任务栏架构，工具内置双候选优先级探测机制：
+1. `SystemTray.dll`（候选 1，Windows 11 Build 26300 系列的新宿主）
+2. `Taskbar.View.dll`（候选 2，现有已验证环境的宿主）
 
-整个模块内只有两处函数引用了时间格式化 API：
-- `0x34BA4`：日期行格式化（引用 `GetDateFormatEx` ×2，`GetLocalTime`）
-- `0x35960`：时间行格式化（引用 `GetTimeFormatEx`）
+在向目标模块应用挂钩前，工具**必须先完成只读身份与调用点探测**。严格校验 PE 机器架构 (x64)、PE 时间戳 (TimeDateStamp)、映像大小 (SizeOfImage) 以及导入地址表 (IAT) 与调用点布局。**对未经验证的模块布局或超限调用点一律安全拒绝，绝不进行截断挂钩或破坏性写入。**
 
-本工具**只修改 `Taskbar.View.dll` 模块自身的导入地址表（IAT）**，绝不装载全局 Hook，绝不污染系统级 `kernelbase.dll` 导出表。
+当前已实现并通过静态与隔离测试的配置如下；**Build 26300 的真实桌面验收尚未执行**，不能把配置匹配视为全部功能已验收。来源、采集步骤和待验收项目见 [Build26300 验证与验收](docs/Build26300验证与验收.md)。
+
+#### 配置 A：Windows 11 Build 26300 (`SystemTray.dll` 2609.11000.100.0)
+- **模块身份**：FileVersion `2609.11000.100.0`，TimeDateStamp `0x6AA9E607`，SizeOfImage `0x202000`，Machine `0x8664`（AMD64）。Winbindex 关联 Windows 11 Build 26300.9807 / 26300.9818。
+- **挂钩策略**：`STRATEGY_LOCAL_SOURCE`
+- **挂钩范围**：保持同模块 IAT，**仅挂钩 `GetLocalTime` 槽 (`0x18B270`)**。
+  - **RefreshIcon 主时钟数据源返回点 (`0xCA3BD`, `0x12B73D`)**：启用时用同一次目标时间取样完整替换 `SYSTEMTIME`，包含真实秒数、毫秒数；不拼接旧取样字段，不消费 kick，并记录命中次数。
+  - **ScheduleNextUpdate 调度返回点 (`0xCAA7D`, `0x12BCED`)**：不改变时区，仅在有刷新请求时消费一次 kick 并将秒设为 59；无 kick 或非调度点透传。
+  - **附加时钟安全隔离**：该版本中 `GetTimeString` 与 `GetShortenedTimeString` 被 `GetTimeToolTipString` 用于附加时钟格式化。本工具**绝对不改写其 `GetTimeFormatEx` (`0x18B288`) 与 `GetDateFormatEx` (`0x18B278`) 槽**，从而完整保留附加时钟的独立时区换算与格式化输出。
+  - **全量调用点核验**：只读核对全部 18 个调用点（time 7 个：`0xC8150`, `0xC85F3`, `0xC8A7B`, `0xC8A90`, `0x129C9B`, `0x129F4F`, `0x129F64`；date 7 个：`0xCC3F9`, `0xCC5BE`, `0xCC5F7`, `0xCC9C6`, `0x12CAFE`, `0x12CCB9`, `0x12CCEF`；local 4 个：`0xCA3BD`, `0xCAA7D`, `0x12B73D`, `0x12BCED`），调用点不全或多出额外调用均安全拒绝。
+- **支持范围边界**：严格限制于官方符号与真实二进制核验的 `2609.11000.100.0`，不放宽版本匹配，不将 `2609.11000` 视为作者所称 `2609.12001`，亦不宣称支持全部 26300 版本。
+
+#### 配置 B：Windows 11 23H2 (`Taskbar.View.dll` 623.27903.70.0)
+- **模块身份**：FileVersion `623.27903.70.0`，TimeDateStamp `0x654E6445`，SizeOfImage `0x758000`，Machine `0x8664`（AMD64）。
+- **挂钩策略**：`STRATEGY_FORMAT_REWRITE`
+- **挂钩范围**：挂钩 `GetTimeFormatEx` (`0x617578`)、`GetDateFormatEx` (`0x617580`) 与 `GetLocalTime` (`0x617880`)。
+  - 时间返回调用点：`0x359FF`
+  - 日期返回调用点：`0x34DF9`, `0x34E4F`
+  - 调度 kick 返回点：`0x34C0C` (仅此调用点允许消费 kick，其余调用完全透传)
 
 ### 2. 返回地址白名单（Call-site Filtering）
-Hook 函数内部引入了调用点返回地址二次白名单：
-- 时间行：仅放行来自 RVA `0x359FF` 的调用；
-- 日期行：仅放行来自 RVA `0x34DF9` 与 `0x34E4F` 的调用；
-- 其它任何非目标时钟代码调用这两个 API 时，**原样透传执行**，实现真正的零副作用。
+Hook 函数内部引入了调用点返回地址二次白名单与严格判定 Helper：
+- 仅放行来自已验证白名单 RVAs 的调用；
+- 其它非目标调用原样透传，限制修改范围。
 
 ### 3. 高精度时区规则转换
 拒绝使用简单的“本地时间 ± 固定小时”：
@@ -68,7 +84,9 @@ Hook 函数内部引入了调用点返回地址二次白名单：
 ## 🚀 快速开始与用法
 
 ### 1. 下载与解压
-从 [Releases](https://github.com/ana52070/LocalTimeTzClock/releases) 下载便携发布包（包含 `tzclock.exe`、`tzclock_v13.dll`、`tzclock.ini`）。
+已发布便携包可从 [Releases](https://github.com/ana52070/LocalTimeTzClock/releases) 下载，DLL 名以对应发布版本为准。当前源码构建产物为 `tzclock.exe`、`tzclock_v16.dll`、`tzclock.ini`（位于 `artifacts/pr2-v16`）。
+
+升级时请成套替换控制器和 DLL。旧版 DLL 即使执行 `off`，也仍留在 Explorer 中并保留透传挂钩；新版本发现已有挂钩会拒绝叠加。请保存工作后自行重新登录或重启 Explorer，再测试 v16；工具不会自动终止 Explorer。
 
 ### 2. 配置时区 (`tzclock.ini`)
 与 `tzclock.exe` 放置在同一目录下编辑：
@@ -124,9 +142,23 @@ Log=0
 ### 一键构建
 在仓库根目录执行：
 ```bat
-build.bat dist
+build.bat artifacts\pr2-v16
 ```
-脚本将自动调用 `vcvarsall.bat` 并生成高度优化的产物至 `dist` 目录。
+脚本将自动调用 `vcvarsall.bat` 并生成高度优化的产物至指定目录。
+
+---
+
+## 📋 新版系统适配与人工验收清单 (Manual Acceptance Checklist)
+
+新增配置先完成模块、符号、数据流和隔离测试核验；发布为稳定支持前，还需在受控的对应 Windows 版本桌面环境完成下列人工验收：
+
+- [ ] **1. 真实宿主定位与导入表确认**：确认目标系统下任务栏时钟所在的真实宿主 DLL（如 `SystemTray.dll`），核实其是否直接导入目标 API，且具备合法的 `OriginalFirstThunk`。
+- [ ] **2. 调用点全量语义审计**：静态反汇编分析所有调用点，明确区分主时钟数据源与附加时钟等其他指定时间的显示；非目标调用必须透传。
+- [ ] **3. 进程隔离与无副作用注入**：在独立测试环境运行 `tzclock.exe on`，确认仅目标模块 IAT 被定向挂接，`explorer.exe` 内其他模块时间戳与时区 100% 保持原生系统时区。
+- [ ] **4. 多显示器副任务栏同步重绘**：在双屏/多屏环境下切换时区，确认主任务栏（`Shell_TrayWnd`）与副任务栏（`Shell_SecondaryTrayWnd`）均能即时完成重绘刷新。
+- [ ] **5. 电源休眠唤醒测试**：使系统进入睡眠/休眠状态，唤醒后确认任务栏时钟能通过 `RegisterSuspendResumeNotification` 回调自动唤醒重绘。
+- [ ] **6. 跨日及冬夏令时边界跳转**：模拟跨午夜日期变更及 DST 换令时点，验证跨日格式化显示正常无闪烁。
+- [ ] **7. 停用与恢复**：运行 `tzclock.exe off`，确认挂钩切换为透传，时钟恢复系统时区且无崩溃。
 
 ---
 
@@ -144,7 +176,7 @@ build.bat dist
 
 ### Why It's Better
 - **True Native Clock**: No fake overlay windows, no intrusive Electron frameworks, no replacement widgets. The native taskbar clock UI, Fluent design, DPI scaling, and calendar flyout remain 100% functional.
-- **Surgically Scoped**: Patches only the Import Address Table (IAT) slots of `Taskbar.View.dll` with return address whitelist verification. Non-clock components inside Explorer are never affected.
+- **修改范围**：只修改已核实宿主的指定 IAT 槽并核对调用点；新版保留附加时钟的独立格式化路径，真实界面验收仍待完成。
 - **Accurate Time Transition**: Uses `SystemTimeToTzSpecificLocalTimeEx` with `DYNAMIC_TIME_ZONE_INFORMATION` to handle Daylight Saving Time (DST), midnight rollovers, and 30/45-minute offset time zones.
 - **Extreme Efficiency**: Entire release package is only **~38 KB**, resident memory in Explorer is just **36 KB**, with **0.00%** CPU usage.
 
