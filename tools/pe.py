@@ -1,7 +1,8 @@
 import struct
 class PE:
     def __init__(self,path):
-        self.d=open(path,'rb').read()
+        with open(path,'rb') as source:
+            self.d=source.read()
         d=self.d
         self.pe=struct.unpack_from('<I',d,0x3C)[0]
         self.machine=struct.unpack_from('<H',d,self.pe+4)[0]
