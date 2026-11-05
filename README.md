@@ -1,3 +1,22 @@
+# Windows 10 适配版 v17
+
+本仓库基于 ana52070/LocalTimeTzClock。**Win10 可构建源码与说明位于 [win10/](win10/README.md)。** 根目录其余文件保留上游版本。
+
+- 适配系统：Windows 10 专业版 22H2，19045.2728，x64。
+- 对应 Explorer：10.0.19041.2311。
+- 主时钟采用北京时间；系统时区、悬停提示与日历面板沿用 Windows 原有设置和逻辑。
+- 构建：进入 `win10` 目录，执行 `build.bat dist`。
+- 启用：在产物目录执行 `tzclock.exe on`；查看状态：`tzclock.exe status`。
+- [实现细节](win10/docs/Windows10.md) · [Win10 DLL 源码](win10/src/dll/tzclock.cpp) · [控制器源码](win10/src/app/tzclock.cpp)
+
+系统切换为 `Pacific Standard Time` 后，本机程序仍报告 `supported: yes`、`active: yes`。
+
+许可证沿用 MIT，并保留上游版权声明与提交历史。
+
+---
+
+## 上游项目原始说明
+
 <div align="center">
 
 # LocalTimeTzClock
